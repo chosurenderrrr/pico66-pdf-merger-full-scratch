@@ -1,0 +1,1181 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF Merger</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #13131a;
+    --border: #2a2a3a;
+    --accent: #00e5ff;
+    --accent2: #7c3aed;
+    --text: #e8e8f0;
+    --muted: #5a5a7a;
+    --success: #00ff88;
+    --danger: #ff4466;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+    background-image:
+      radial-gradient(ellipse at 20% 10%, rgba(124,58,237,0.15) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 80%, rgba(0,229,255,0.08) 0%, transparent 50%);
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+
+  header h1 {
+    font-family: 'Courier New', 'Osaka-Mono', monospace;
+    font-size: clamp(2rem, 5vw, 3.5rem);
+    letter-spacing: -2px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  header p {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-top: 8px;
+    font-weight: 300;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px;
+    width: 100%;
+    max-width: 680px;
+    margin-bottom: 20px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  }
+
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 48px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+  }
+
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(0,229,255,0.04);
+  }
+
+  .drop-zone input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .drop-icon {
+    font-size: 3rem;
+    margin-bottom: 16px;
+    display: block;
+    filter: grayscale(0.5);
+  }
+
+  .drop-zone h3 {
+    font-family: 'Courier New', 'Osaka-Mono', monospace;
+    font-size: 1rem;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+
+  .drop-zone p {
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+
+  .file-list {
+    margin-top: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .file-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    transition: all 0.2s;
+    animation: slideIn 0.2s ease;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .file-item.drag-item { opacity: 0.4; }
+
+  .drag-handle {
+    color: var(--muted);
+    cursor: grab;
+    font-size: 1rem;
+    user-select: none;
+    flex-shrink: 0;
+  }
+
+  .drag-handle:active { cursor: grabbing; }
+
+  .file-icon {
+    color: var(--accent);
+    font-size: 1.2rem;
+    flex-shrink: 0;
+  }
+
+  .file-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .file-name {
+    font-family: 'Courier New', 'Osaka-Mono', monospace;
+    font-size: 0.78rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text);
+  }
+
+  .file-size {
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .file-remove {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 4px;
+    border-radius: 6px;
+    transition: all 0.2s;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+
+  .file-remove:hover { color: var(--danger); background: rgba(255,68,102,0.1); }
+
+  .order-hint {
+    font-size: 0.75rem;
+    color: var(--muted);
+    text-align: center;
+    margin-top: 12px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 14px 28px;
+    border: none;
+    border-radius: 10px;
+    font-family: 'Courier New', 'Osaka-Mono', monospace;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    width: 100%;
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent), #0099cc);
+    color: #000;
+    box-shadow: 0 4px 20px rgba(0,229,255,0.25);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 30px rgba(0,229,255,0.4);
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .progress-wrap {
+    display: none;
+    margin-top: 20px;
+  }
+
+  .progress-wrap.active { display: block; }
+
+  .progress-label {
+    display: flex;
+    justify-content: space-between;
+    font-family: 'Courier New', 'Osaka-Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+
+  .progress-bar {
+    height: 4px;
+    background: var(--border);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent2), var(--accent));
+    border-radius: 99px;
+    width: 0%;
+    transition: width 0.3s ease;
+  }
+
+  .log {
+    margin-top: 20px;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    font-family: 'Courier New', 'Osaka-Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--muted);
+    max-height: 150px;
+    overflow-y: auto;
+    display: none;
+  }
+
+  .log.active { display: block; }
+  .log .log-ok { color: var(--success); }
+  .log .log-err { color: var(--danger); }
+  .log .log-info { color: var(--accent); }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 99px;
+    font-family: 'Courier New', 'Osaka-Mono', monospace;
+    font-size: 0.65rem;
+    background: rgba(0,229,255,0.15);
+    color: var(--accent);
+    border: 1px solid rgba(0,229,255,0.2);
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+
+  footer {
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-align: center;
+    margin-top: 12px;
+    font-family: 'Courier New', 'Osaka-Mono', monospace;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>PDF MERGER</h1>
+  <p>外部ライブラリ不使用 — フルスクラッチ実装 <span class="badge">Pure JS</span></p>
+</header>
+
+<div class="card">
+  <div class="drop-zone" id="dropZone">
+    <input type="file" accept=".pdf" multiple id="fileInput">
+    <span class="drop-icon">📄</span>
+    <h3>PDFをドロップ または クリックして選択</h3>
+    <p>複数ファイルを選択可能。ドラッグで順番を変更できます。</p>
+  </div>
+
+  <div class="file-list" id="fileList"></div>
+  <p class="order-hint" id="orderHint" style="display:none">↕ ドラッグで順番を並び替えできます</p>
+</div>
+
+<div class="card">
+  <button class="btn btn-primary" id="mergeBtn" disabled>
+    ⬇ PDFを結合してダウンロード
+  </button>
+
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-label">
+      <span id="progressText">処理中...</span>
+      <span id="progressPct">0%</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+  </div>
+
+  <div class="log" id="log"></div>
+</div>
+
+<footer>All processing is done locally in your browser. No files are uploaded.</footer>
+
+<script>
+// ============================================================
+//  PURE JS PDF MERGER — NO EXTERNAL LIBRARIES
+//  PDF 1.4 Cross-reference table format, compatible merger
+// ============================================================
+
+const fileInput = document.getElementById('fileInput');
+const dropZone = document.getElementById('dropZone');
+const fileListEl = document.getElementById('fileList');
+const mergeBtn = document.getElementById('mergeBtn');
+const orderHint = document.getElementById('orderHint');
+const progressWrap = document.getElementById('progressWrap');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
+const progressPct = document.getElementById('progressPct');
+const logEl = document.getElementById('log');
+
+let files = []; // { file, name, size }
+
+// ---- Drag-drop file input ----
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  addFiles([...e.dataTransfer.files].filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf')));
+});
+fileInput.addEventListener('change', () => { addFiles([...fileInput.files]); fileInput.value = ''; });
+
+function addFiles(newFiles) {
+  newFiles.forEach(f => files.push({ file: f, name: f.name, size: f.size }));
+  renderList();
+}
+
+function renderList() {
+  fileListEl.innerHTML = '';
+  files.forEach((item, i) => {
+    const el = document.createElement('div');
+    el.className = 'file-item';
+    el.draggable = true;
+    el.dataset.index = i;
+    el.innerHTML = `
+      <span class="drag-handle" title="ドラッグして並び替え">⠿</span>
+      <span class="file-icon">📄</span>
+      <div class="file-info">
+        <div class="file-name">${escHtml(item.name)}</div>
+        <div class="file-size">${(item.size / 1024).toFixed(1)} KB</div>
+      </div>
+      <button class="file-remove" data-i="${i}" title="削除">✕</button>
+    `;
+    fileListEl.appendChild(el);
+  });
+  setupDragSort();
+  fileListEl.querySelectorAll('.file-remove').forEach(btn => {
+    btn.addEventListener('click', () => { files.splice(+btn.dataset.i, 1); renderList(); });
+  });
+  mergeBtn.disabled = files.length < 2;
+  orderHint.style.display = files.length >= 2 ? '' : 'none';
+}
+
+// ---- Drag-to-sort ----
+let dragSrc = null;
+function setupDragSort() {
+  fileListEl.querySelectorAll('.file-item').forEach(item => {
+    item.addEventListener('dragstart', e => { dragSrc = item; item.classList.add('drag-item'); e.dataTransfer.effectAllowed = 'move'; });
+    item.addEventListener('dragend', () => { dragSrc = null; document.querySelectorAll('.file-item').forEach(i => i.classList.remove('drag-item')); });
+    item.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+    item.addEventListener('drop', e => {
+      e.preventDefault();
+      if (!dragSrc || dragSrc === item) return;
+      const from = +dragSrc.dataset.index;
+      const to = +item.dataset.index;
+      const tmp = files.splice(from, 1)[0];
+      files.splice(to, 0, tmp);
+      renderList();
+    });
+  });
+}
+
+function escHtml(s) { return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ---- Logging ----
+function log(msg, cls = '') {
+  logEl.classList.add('active');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = '> ' + msg;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setProgress(pct, label) {
+  progressFill.style.width = pct + '%';
+  progressPct.textContent = pct + '%';
+  if (label) progressText.textContent = label;
+}
+
+// ============================================================
+//  PDF PARSER — reads raw bytes, extracts objects & pages
+// ============================================================
+
+class PDFParser {
+  constructor(buffer) {
+    this.buf = new Uint8Array(buffer);
+    this.str = null; // lazy
+  }
+
+  // Decode bytes as latin-1 for string operations (chunked to avoid stack overflow)
+  getString() {
+    if (!this.str) {
+      const CHUNK = 8192;
+      let result = '';
+      for (let i = 0; i < this.buf.length; i += CHUNK) {
+        result += String.fromCharCode(...this.buf.subarray(i, i + CHUNK));
+      }
+      this.str = result;
+    }
+    return this.str;
+  }
+
+  // Find byte offset of last occurrence of a string
+  lastIndexOf(s) { return this.getString().lastIndexOf(s); }
+  indexOf(s, from) { return this.getString().indexOf(s, from); }
+  slice(s, e) { return this.getString().slice(s, e); }
+
+  // Read xref offset from %%EOF tail
+  getStartXref() {
+    const tail = this.getString().slice(-512);
+    const m = tail.match(/startxref\s+(\d+)\s+%%EOF/);
+    if (!m) throw new Error('startxref not found');
+    return parseInt(m[1]);
+  }
+
+  // Parse a cross-reference table at given offset
+  // Returns { offsets: Map<objNum, offset>, trailerStr }
+  parseXref(offset) {
+    const s = this.getString();
+    let pos = offset;
+
+    // Skip whitespace
+    while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+    const offsets = new Map();
+
+    if (s.startsWith('xref', pos)) {
+      // Traditional xref table
+      pos += 4;
+      while (pos < s.length) {
+        while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+        const line = this._readLine(s, pos);
+        pos += line.length;
+        if (line.trim() === 'trailer') break;
+        const m = line.trim().match(/^(\d+)\s+(\d+)$/);
+        if (!m) { pos -= line.length; break; }
+        const first = parseInt(m[1]);
+        const count = parseInt(m[2]);
+        for (let i = 0; i < count; i++) {
+          while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+          const entry = s.slice(pos, pos + 20);
+          pos += 20;
+          const em = entry.match(/^(\d{10})\s+(\d{5})\s+([fn])/);
+          if (em && em[3] === 'f') { offsets.set(first + i, null); continue; }
+          if (em && em[3] === 'n') offsets.set(first + i, parseInt(em[1]));
+        }
+      }
+      // Read trailer dict
+      while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+      const trailerStart = s.indexOf('<<', pos);
+      const trailerEnd = this._findDictEnd(s, trailerStart);
+      return { offsets, trailerStr: s.slice(trailerStart, trailerEnd) };
+    } else if (s.startsWith('stream', pos) || /^\d+\s+\d+\s+obj/.test(s.slice(pos, pos + 30))) {
+      // XRef stream (PDF 1.5+) — simplified: fall back to rebuild
+      throw new Error('XRef stream not supported, trying repair');
+    }
+    throw new Error('Unknown xref format at ' + offset);
+  }
+
+  _readLine(s, pos) {
+    let end = pos;
+    while (end < s.length && s[end] !== '\n' && s[end] !== '\r') end++;
+    if (s[end] === '\r' && s[end+1] === '\n') end += 2;
+    else end++;
+    return s.slice(pos, end);
+  }
+
+  // Find matching >> for a << at startPos
+  _findDictEnd(s, startPos) {
+    let depth = 0;
+    let i = startPos;
+    while (i < s.length) {
+      if (s[i] === '<' && s[i+1] === '<') { depth++; i += 2; }
+      else if (s[i] === '>' && s[i+1] === '>') { depth--; i += 2; if (depth === 0) return i; }
+      else i++;
+    }
+    return i;
+  }
+
+  // Get raw bytes of an object given its offset
+  getObjectBytes(offset) {
+    const s = this.getString();
+    // find "obj" keyword
+    const objStart = s.indexOf(' obj', offset) + 4;
+    let pos = objStart;
+    while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+    // find endobj or endstream
+    const endobj = s.indexOf('endobj', pos);
+    return { objBody: s.slice(pos, endobj).trim(), endPos: endobj + 6 };
+  }
+
+  // Parse trailer for /Root, /Info, /Pages
+  parseTrailerDict(trailerStr) {
+    const root = this._getDictRef(trailerStr, 'Root');
+    const info = this._getDictRef(trailerStr, 'Info');
+    const pages = null; // obtained via Root
+    return { root, info };
+  }
+
+  _getDictRef(dict, key) {
+    const m = dict.match(new RegExp('/' + key + '\\s+(\\d+)\\s+(\\d+)\\s+R'));
+    if (!m) return null;
+    return { num: parseInt(m[1]), gen: parseInt(m[2]) };
+  }
+
+  // Full parse: returns { objects: Map<num, {offset}>, root, info, pageNums: [] }
+  parse() {
+    let xrefOffset = this.getStartXref();
+    let result;
+    try {
+      result = this.parseXref(xrefOffset);
+    } catch(e) {
+      // Attempt linear scan rebuild
+      result = this.rebuildXref();
+    }
+    const { offsets, trailerStr } = result;
+    const trailer = this.parseTrailerDict(trailerStr);
+    return { offsets, trailer };
+  }
+
+  // Fallback: scan file for "N G obj" patterns
+  rebuildXref() {
+    const s = this.getString();
+    const offsets = new Map();
+    const re = /(\d+)\s+(\d+)\s+obj/g;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      offsets.set(parseInt(m[1]), m.index);
+    }
+    // Find trailer
+    let trailerPos = s.lastIndexOf('trailer');
+    let trailerStr = '';
+    if (trailerPos >= 0) {
+      const ds = s.indexOf('<<', trailerPos);
+      const de = this._findDictEnd(s, ds);
+      trailerStr = s.slice(ds, de);
+    }
+    return { offsets, trailerStr };
+  }
+
+  // Get the raw string of the entire PDF
+  raw() { return this.getString(); }
+}
+
+// ============================================================
+//  PDF MERGER
+// ============================================================
+
+async function mergePDFs(fileItems) {
+  log('PDF結合を開始します', 'log-info');
+
+  const parsedPDFs = [];
+
+  for (let i = 0; i < fileItems.length; i++) {
+    const item = fileItems[i];
+    setProgress(Math.round((i / fileItems.length) * 40), `読み込み中: ${item.name}`);
+    log(`[${i+1}/${fileItems.length}] 読み込み: ${item.name}`);
+    const buf = await item.file.arrayBuffer();
+    const parser = new PDFParser(buf);
+    try {
+      const { offsets, trailer } = parser.parse();
+      parsedPDFs.push({ parser, offsets, trailer, name: item.name });
+      log(`  → ${offsets.size} オブジェクト検出`, 'log-ok');
+    } catch(e) {
+      log(`  ✗ パースエラー: ${e.message}`, 'log-err');
+      throw new Error(`${item.name} の解析に失敗: ${e.message}`);
+    }
+  }
+
+  setProgress(45, 'オブジェクトを統合中...');
+
+  // We'll build a new PDF by collecting all page streams and recreating
+  // a minimal but valid merged PDF using the raw content approach.
+
+  const allPageContent = []; // collected page data from all PDFs
+
+  // Strategy: extract each PDF's pages as raw byte ranges and reuse them
+  // with remapped object numbers.
+
+  for (let fi = 0; fi < parsedPDFs.length; fi++) {
+    const { parser, offsets, trailer } = parsedPDFs[fi];
+    setProgress(45 + Math.round((fi / parsedPDFs.length) * 40), `ページ収集: ${parsedPDFs[fi].name}`);
+
+    const raw = parser.raw();
+
+    // Find all page objects via type check
+    const pageOffsets = [];
+    for (const [num, offset] of offsets) {
+      if (offset === null) continue;
+      const { objBody } = parser.getObjectBytes(offset);
+      if (objBody.includes('/Type') && objBody.includes('/Page') && !objBody.includes('/Pages')) {
+        pageOffsets.push({ num, offset, body: objBody });
+      }
+    }
+
+    // Sort pages by their position in the file (approximates page order)
+    // Better: follow the /Pages tree. For simplicity, sort by object number or use Kids order.
+    // Try to get Kids order from /Pages object
+    let orderedPages = getSortedPages(parser, offsets, pageOffsets, raw);
+
+    log(`  → ${orderedPages.length} ページ検出`, 'log-ok');
+
+    for (const pg of orderedPages) {
+      allPageContent.push({ raw, parser, offsets, pageBody: pg.body, pageNum: pg.num, fileIdx: fi });
+    }
+  }
+
+  setProgress(88, '新しいPDFを構築中...');
+  log('新しいPDFを構築しています...', 'log-info');
+
+  const pdfBytes = buildMergedPDF(allPageContent);
+  setProgress(100, '完成！');
+  log('結合完了！', 'log-ok');
+  return pdfBytes;
+}
+
+function getSortedPages(parser, offsets, pageOffsets, raw) {
+  // Try to find /Pages dict and read /Kids array for ordering
+  const s = raw;
+  const pagesObjMatch = s.match(/\d+\s+\d+\s+obj\s*<<[^>]*\/Type\s*\/Pages[^>]*>>/g);
+  if (pagesObjMatch) {
+    const kidsMatch = pagesObjMatch[0].match(/\/Kids\s*\[([\d\s\nR]+)\]/);
+    if (kidsMatch) {
+      const refs = kidsMatch[1].trim().split(/\s+R\s*/).filter(r => r.trim()).map(r => parseInt(r.trim().split(/\s+/)[0]));
+      const sorted = [];
+      for (const ref of refs) {
+        const found = pageOffsets.find(p => p.num === ref);
+        if (found) sorted.push(found);
+      }
+      if (sorted.length > 0) return sorted;
+    }
+  }
+  // Fallback: sort by object number
+  return pageOffsets.sort((a, b) => a.num - b.num);
+}
+
+function buildMergedPDF(allPageContent) {
+  // Build a new minimal PDF with:
+  // 1. Header
+  // 2. Catalog, Pages, and all page objects + their streams
+  // Each page's content streams and resources are copied verbatim with new obj numbers
+
+  const enc = new TextEncoder();
+  const parts = []; // Uint8Array parts
+  const offsets = []; // byte offset of each object
+  let pos = 0;
+
+  function write(s) {
+    const b = typeof s === 'string' ? enc.encode(s) : s;
+    parts.push(b);
+    pos += b.length;
+  }
+
+  // Header
+  write('%PDF-1.4\n');
+  write('%\xE2\xE3\xCF\xD3\n'); // binary hint
+
+  // We'll assign new object numbers:
+  // 1 = Catalog
+  // 2 = Pages
+  // 3..N = page objects and their content streams
+
+  let nextObjNum = 3;
+  const pageObjNums = [];
+  const pendingObjs = []; // { num, str }
+
+  for (let pi = 0; pi < allPageContent.length; pi++) {
+    const { raw, parser, offsets: srcOffsets, pageBody, pageNum, fileIdx } = allPageContent[pi];
+
+    // Parse the page body to extract /MediaBox, /Contents, /Resources
+    const mediaBox = extractDict(pageBody, 'MediaBox') || '[0 0 595 842]';
+    const contentsRef = extractDictValue(pageBody, 'Contents');
+    const resourcesVal = extractDictValue(pageBody, 'Resources');
+
+    // Copy content stream(s)
+    let contentObjNum = null;
+    let inlineResources = '/Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] >>';
+
+    if (contentsRef) {
+      const streams = collectContentStreams(raw, parser, srcOffsets, contentsRef);
+      if (streams.length > 0) {
+        // Merge all streams into one
+        const combinedStream = mergeStreams(streams);
+        contentObjNum = nextObjNum++;
+        pendingObjs.push({ num: contentObjNum, data: buildStreamObj(combinedStream) });
+      }
+    }
+
+    // Resources: try to inline or reference
+    let resourcesStr = '/Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] >>';
+    if (resourcesVal) {
+      // If resources is a direct dict, embed it (fonts may be embedded)
+      if (resourcesVal.trim().startsWith('<<')) {
+        resourcesStr = '/Resources ' + resourcesVal;
+      } else {
+        // It's a reference — try to resolve and embed
+        const rRef = parseRef(resourcesVal);
+        if (rRef && srcOffsets.has(rRef.num)) {
+          const rOffset = srcOffsets.get(rRef.num);
+          if (rOffset !== null) {
+            const { objBody: rBody } = parser.getObjectBytes(rOffset);
+            if (rBody.trim().startsWith('<<')) {
+              resourcesStr = '/Resources ' + embedResourcesDeep(rBody, raw, parser, srcOffsets, pendingObjs, function(){ return nextObjNum++; });
+            }
+          }
+        }
+      }
+    }
+
+    const pageNum2 = nextObjNum++;
+    pageObjNums.push(pageNum2);
+
+    let pageDict = `<< /Type /Page /Parent 2 0 R\n`;
+    pageDict += `/MediaBox ${mediaBox}\n`;
+    pageDict += `${resourcesStr}\n`;
+    if (contentObjNum) pageDict += `/Contents ${contentObjNum} 0 R\n`;
+    pageDict += `>>`;
+    pendingObjs.push({ num: pageNum2, data: pageDict });
+  }
+
+  // Write objects in order
+  // First collect all and sort by num
+  const allObjs = [
+    { num: 1, data: `<< /Type /Catalog /Pages 2 0 R >>` },
+    { num: 2, data: `<< /Type /Pages /Kids [${pageObjNums.map(n => n + ' 0 R').join(' ')}] /Count ${pageObjNums.length} >>` },
+    ...pendingObjs
+  ].sort((a, b) => a.num - b.num);
+
+  const xrefOffsets = new Map();
+  for (const obj of allObjs) {
+    xrefOffsets.set(obj.num, pos);
+    write(`${obj.num} 0 obj\n${obj.data}\nendobj\n`);
+  }
+
+  const xrefPos = pos;
+  const maxObj = Math.max(...xrefOffsets.keys());
+  write(`xref\n0 ${maxObj + 1}\n`);
+  write(`0000000000 65535 f \n`);
+  for (let i = 1; i <= maxObj; i++) {
+    if (xrefOffsets.has(i)) {
+      write((xrefOffsets.get(i) + '').padStart(10, '0') + ' 00000 n \n');
+    } else {
+      write(`0000000000 65535 f \n`);
+    }
+  }
+  write(`trailer\n<< /Size ${maxObj + 1} /Root 1 0 R >>\n`);
+  write(`startxref\n${xrefPos}\n%%EOF\n`);
+
+  // Combine all parts
+  let totalLen = 0;
+  for (const p of parts) totalLen += p.length;
+  const result = new Uint8Array(totalLen);
+  let off = 0;
+  for (const p of parts) { result.set(p, off); off += p.length; }
+  return result;
+}
+
+// Extract a value from a PDF dict string by key
+function extractDictValue(dict, key) {
+  const re = new RegExp('/' + key + '\\s+');
+  const m = re.exec(dict);
+  if (!m) return null;
+  const rest = dict.slice(m.index + m[0].length);
+  if (rest.startsWith('<<')) {
+    // nested dict
+    let depth = 0, i = 0;
+    while (i < rest.length) {
+      if (rest[i]==='<'&&rest[i+1]==='<') { depth++; i+=2; }
+      else if (rest[i]==='>'&&rest[i+1]==='>') { depth--; i+=2; if(depth===0) return rest.slice(0,i); }
+      else i++;
+    }
+    return rest.slice(0, i);
+  }
+  if (rest.startsWith('[')) {
+    let depth = 0, i = 0;
+    while (i < rest.length) {
+      if (rest[i]==='[') depth++;
+      else if (rest[i]===']') { depth--; if(depth===0) return rest.slice(0,i+1); }
+      i++;
+    }
+  }
+  // ref or simple value
+  const vm = rest.match(/^[\d\s]+R|^\/\S+|^\S+/);
+  return vm ? vm[0] : null;
+}
+
+function extractDict(body, key) {
+  const val = extractDictValue(body, key);
+  return val;
+}
+
+function parseRef(str) {
+  if (!str) return null;
+  const m = str.trim().match(/^(\d+)\s+(\d+)\s+R/);
+  if (!m) return null;
+  return { num: parseInt(m[1]), gen: parseInt(m[2]) };
+}
+
+function collectContentStreams(raw, parser, srcOffsets, contentsVal) {
+  const streams = [];
+  // Could be a ref, array of refs, or inline
+  const trimmed = contentsVal.trim();
+  let refs = [];
+  if (trimmed.startsWith('[')) {
+    // array of refs
+    const inner = trimmed.slice(1, trimmed.lastIndexOf(']'));
+    const rems = inner.matchAll(/(\d+)\s+\d+\s+R/g);
+    for (const rm of rems) refs.push(parseInt(rm[1]));
+  } else {
+    const r = parseRef(trimmed);
+    if (r) refs.push(r.num);
+  }
+
+  for (const refNum of refs) {
+    if (!srcOffsets.has(refNum)) continue;
+    const offset = srcOffsets.get(refNum);
+    if (offset === null) continue;
+    const streamBytes = extractStream(raw, parser, offset);
+    if (streamBytes) streams.push(streamBytes);
+  }
+  return streams;
+}
+
+function extractStream(raw, parser, offset) {
+  const s = raw;
+  // find obj body
+  const objStart = s.indexOf(' obj', offset) + 4;
+  let pos = objStart;
+  while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+  // parse dict to find /Length and /Filter
+  const dictEnd = parser._findDictEnd(s, pos);
+  const dictStr = s.slice(pos, dictEnd);
+
+  const lengthVal = extractDictValue(dictStr, 'Length');
+  const filterVal = extractDictValue(dictStr, 'Filter');
+
+  let length = 0;
+  if (lengthVal) {
+    // Could be a ref
+    const lRef = parseRef(lengthVal);
+    if (lRef && parser.offsets) {
+      // try to resolve
+    } else {
+      length = parseInt(lengthVal) || 0;
+    }
+  }
+
+  // Find stream keyword
+  let streamPos = s.indexOf('stream', dictEnd);
+  if (streamPos < 0) return null;
+  streamPos += 6;
+  if (s[streamPos] === '\r') streamPos++;
+  if (s[streamPos] === '\n') streamPos++;
+
+  let endStream = s.indexOf('endstream', streamPos);
+  if (endStream < 0) return null;
+
+  const streamData = s.slice(streamPos, endStream);
+  return { dictStr, streamData, filterVal };
+}
+
+function mergeStreams(streams) {
+  // We concatenate all uncompressed stream data.
+  // If a stream has filters (like FlateDecode), we pass it through as-is
+  // but we need to handle it. For simplicity: if any stream is compressed,
+  // we'll keep its raw compressed bytes and wrap each in its own q/Q context.
+  // Actually, the cleanest approach: keep raw stream bytes, rebuild as unfiltered
+  // by decoding FlateDecode if needed.
+
+  let combined = '';
+  const enc = new TextEncoder();
+  const parts = [];
+
+  for (const s of streams) {
+    const { dictStr, streamData, filterVal } = s;
+    let data = streamData;
+
+    // Check if FlateDecode
+    if (filterVal && filterVal.includes('FlateDecode')) {
+      try {
+        // Convert latin-1 string to Uint8Array
+        const bytes = Uint8Array.from(streamData, c => c.charCodeAt(0));
+        const decoded = zlibInflate(bytes);
+        // Chunked to avoid stack overflow on large buffers
+        const CHUNK = 8192;
+        let tmp = '';
+        for (let ci = 0; ci < decoded.length; ci += CHUNK) {
+          tmp += String.fromCharCode(...decoded.subarray(ci, ci + CHUNK));
+        }
+        data = tmp;
+      } catch(e) {
+        // Keep raw data, can't inflate
+        data = streamData;
+      }
+    }
+
+    parts.push(data);
+  }
+
+  return parts.join('\n');
+}
+
+function buildStreamObj(streamContent) {
+  const enc = new TextEncoder();
+  const bytes = enc.encode(streamContent);
+  return `<< /Length ${bytes.length} >>\nstream\n${streamContent}\nendstream`;
+}
+
+function embedResourcesDeep(resourceBody, raw, parser, srcOffsets, pendingObjs, allocObj) {
+  // For fonts and other resources referenced by object number,
+  // recursively copy them in
+  return resourceBody; // simplified: embed dict as-is (font references may break for non-embedded fonts)
+}
+
+// ============================================================
+//  ZLIB INFLATE (pure JS, RFC 1950 / DEFLATE RFC 1951)
+//  Handles FlateDecode streams in PDFs
+// ============================================================
+function zlibInflate(data) {
+  // Skip 2-byte zlib header
+  const deflateData = data.slice(2);
+  return inflate(deflateData);
+}
+
+function inflate(data) {
+  const bs = new BitStream(data);
+  const out = [];
+
+  let bFinal = 0;
+  while (!bFinal) {
+    bFinal = bs.readBits(1);
+    const bType = bs.readBits(2);
+    if (bType === 0) {
+      // No compression
+      bs.align();
+      const len = bs.readUint16LE();
+      const nlen = bs.readUint16LE();
+      for (let i = 0; i < len; i++) out.push(bs.readByte());
+    } else if (bType === 1) {
+      inflateBlock(bs, out, fixedLitLenTree(), fixedDistTree());
+    } else if (bType === 2) {
+      const { litLenTree, distTree } = readDynamicTrees(bs);
+      inflateBlock(bs, out, litLenTree, distTree);
+    } else {
+      throw new Error('Invalid btype');
+    }
+  }
+  return new Uint8Array(out);
+}
+
+function inflateBlock(bs, out, litLenTree, distTree) {
+  const lenExtra = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  const lenBase =  [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  const distExtra = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+  const distBase =  [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+
+  while (true) {
+    const sym = decodeSymbol(bs, litLenTree);
+    if (sym === 256) break;
+    if (sym < 256) {
+      out.push(sym);
+    } else {
+      const li = sym - 257;
+      const length = lenBase[li] + bs.readBits(lenExtra[li]);
+      const di = decodeSymbol(bs, distTree);
+      const dist = distBase[di] + bs.readBits(distExtra[di]);
+      const start = out.length - dist;
+      for (let i = 0; i < length; i++) out.push(out[start + i]);
+    }
+  }
+}
+
+// Flat-array Huffman lookup table (no recursion, no deep object traversal)
+// table entries: (sym << 5) | codeLen,  -1 = invalid
+function buildTree(lengths) {
+  const maxLen = lengths.length === 0 ? 0 : Math.max(...lengths);
+  if (maxLen === 0) return { table: new Int32Array(0), maxLen: 0 };
+
+  const blCount = new Array(maxLen + 1).fill(0);
+  for (const l of lengths) if (l > 0) blCount[l]++;
+
+  const nextCode = new Array(maxLen + 2).fill(0);
+  for (let bits = 1; bits <= maxLen; bits++)
+    nextCode[bits + 1] = (nextCode[bits] + blCount[bits]) << 1;
+
+  const tableSize = 1 << maxLen;
+  const table = new Int32Array(tableSize).fill(-1);
+
+  for (let i = 0; i < lengths.length; i++) {
+    const len = lengths[i];
+    if (len === 0) continue;
+    const code = nextCode[len]++;
+    const fill = maxLen - len;
+    const base = code << fill;
+    const count = 1 << fill;
+    const val = (i << 5) | len;
+    for (let j = 0; j < count; j++) table[base + j] = val;
+  }
+
+  return { table, maxLen };
+}
+
+function decodeSymbol(bs, tree) {
+  const { table, maxLen } = tree;
+  const code = bs.peekBits(maxLen);
+  const entry = table[code];
+  if (entry < 0) throw new Error('Invalid Huffman code');
+  const len = entry & 0x1f;
+  const sym = entry >> 5;
+  bs.skipBits(len);
+  return sym;
+}
+
+function fixedLitLenTree() {
+  const lens = [];
+  for (let i = 0; i <= 287; i++) {
+    if (i <= 143) lens.push(8);
+    else if (i <= 255) lens.push(9);
+    else if (i <= 279) lens.push(7);
+    else lens.push(8);
+  }
+  return buildTree(lens);
+}
+
+function fixedDistTree() {
+  return buildTree(new Array(32).fill(5));
+}
+
+function readDynamicTrees(bs) {
+  const hlit = bs.readBits(5) + 257;
+  const hdist = bs.readBits(5) + 1;
+  const hclen = bs.readBits(4) + 4;
+  const codeLenOrder = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+  const codeLenLens = new Array(19).fill(0);
+  for (let i = 0; i < hclen; i++) codeLenLens[codeLenOrder[i]] = bs.readBits(3);
+  const clTree = buildTree(codeLenLens);
+  const lengths = [];
+  while (lengths.length < hlit + hdist) {
+    const sym = decodeSymbol(bs, clTree);
+    if (sym < 16) lengths.push(sym);
+    else if (sym === 16) { const rep = bs.readBits(2) + 3; for (let i = 0; i < rep; i++) lengths.push(lengths[lengths.length-1]); }
+    else if (sym === 17) { const rep = bs.readBits(3) + 3; for (let i = 0; i < rep; i++) lengths.push(0); }
+    else { const rep = bs.readBits(7) + 11; for (let i = 0; i < rep; i++) lengths.push(0); }
+  }
+  return {
+    litLenTree: buildTree(lengths.slice(0, hlit)),
+    distTree: buildTree(lengths.slice(hlit))
+  };
+}
+
+class BitStream {
+  constructor(data) { this.data = data; this.pos = 0; this.bitBuf = 0; this.bitLen = 0; }
+
+  _fill(n) {
+    while (this.bitLen < n) {
+      this.bitBuf |= this.data[this.pos++] << this.bitLen;
+      this.bitLen += 8;
+    }
+  }
+
+  readBits(n) {
+    this._fill(n);
+    const v = this.bitBuf & ((1 << n) - 1);
+    this.bitBuf >>>= n;
+    this.bitLen -= n;
+    return v;
+  }
+
+  // Peek without consuming bits — fills buffer first
+  peekBits(n) {
+    this._fill(n);
+    return this.bitBuf & ((1 << n) - 1);
+  }
+
+  skipBits(n) {
+    this.bitBuf >>>= n;
+    this.bitLen -= n;
+  }
+
+  bitPos() { return this.pos * 8 - this.bitLen; }
+
+  readByte() { this.align(); return this.data[this.pos++]; }
+  readUint16LE() { return this.readByte() | (this.readByte() << 8); }
+  align() { this.bitBuf = 0; this.bitLen = 0; }
+}
+
+// ============================================================
+//  UI glue
+// ============================================================
+mergeBtn.addEventListener('click', async () => {
+  mergeBtn.disabled = true;
+  logEl.innerHTML = '';
+  logEl.classList.add('active');
+  progressWrap.classList.add('active');
+  setProgress(0, '準備中...');
+
+  try {
+    const result = await mergePDFs(files);
+    const blob = new Blob([result], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'merged.pdf';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    log(`✓ ダウンロード開始 (${(result.length/1024).toFixed(1)} KB)`, 'log-ok');
+  } catch(e) {
+    log('エラー: ' + e.message, 'log-err');
+    console.error(e);
+    alert('エラーが発生しました: ' + e.message);
+  } finally {
+    mergeBtn.disabled = files.length < 2;
+  }
+});
+</script>
+</body>
+</html>
