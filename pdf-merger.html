@@ -1325,22 +1325,11 @@ class RawInflate {
     let output = this.output;
     let op = this.op;
     let olength = output.length;
-    let iterations = 0;
-    
-    log(`[DEBUG] decodeHuffmanAdaptive 시작, 출력 위치: ${op}`, 'log-info');
     
     while (true) {
-      iterations++;
-      if (iterations % 1000 === 0) {
-        log(`[DEBUG] 디코딩 중... ${iterations}번째 반복, 출력: ${op}바이트`, 'log-info');
-      }
-      
       const code = this.readCodeByTable(litlen);
       
-      if (code === 256) {
-        log(`[DEBUG] 블록 종료 코드(256) 수신, 총 ${op}바이트`, 'log-info');
-        break;
-      }
+      if (code === 256) break;
       
       if (code < 256) {
         // Literal
@@ -1381,7 +1370,6 @@ class RawInflate {
       this.ip--;
     }
     this.op = op;
-    log(`[DEBUG] decodeHuffmanAdaptive 종료, 총 ${op}바이트`, 'log-info');
   }
   
   expandBuffer(optParam = {}) {
@@ -1394,8 +1382,6 @@ class RawInflate {
     if (newSize > MAX_BUFFER_SIZE) {
       throw new Error(`버퍼 크기가 너무 큽니다: ${newSize} (현재 ${this.output.length})`);
     }
-    
-    log(`[DEBUG] 버퍼 확장: ${this.output.length} -> ${newSize}`, 'log-info');
     
     const buffer = new Uint8Array(newSize);
     buffer.set(this.output);
@@ -1611,25 +1597,16 @@ function extractPages(parser, rawPdf) {
  * Recursively collect pages from Pages tree
  */
 function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
-  log(`[DEBUG] collectPagesFromTree: ${nodeNum}`, 'log-info');
   const node = parser.getObject(nodeNum);
-  if (!node) {
-    log(`[DEBUG] Node not found: ${nodeNum}`, 'log-err');
-    return;
-  }
+  if (!node) return;
 
   const type = extractDictValue(node.body, 'Type');
-  log(`[DEBUG] Node ${nodeNum} type: ${type}`, 'log-info');
 
   if (type === '/Page') {
     // Leaf page
     const mediaBox = extractDictValue(node.body, 'MediaBox') || '[0 0 612 792]';
     const contents = extractDictValue(node.body, 'Contents');
     const resources = extractDictValue(node.body, 'Resources');
-
-    log(`[DEBUG] Page found, mediaBox: ${mediaBox}`, 'log-info');
-    log(`[DEBUG] Page contents: ${contents}`, 'log-info');
-    log(`[DEBUG] Page resources: ${resources ? resources.substring(0, 50) : 'null'}`, 'log-info');
 
     pages.push({
       objNum: nodeNum,
@@ -1641,11 +1618,8 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
   } else if (type === '/Pages') {
     // Intermediate node - process Kids
     const kidsVal = extractDictValue(node.body, 'Kids');
-    log(`[DEBUG] Pages node, kids: ${kidsVal ? kidsVal.substring(0, 100) : 'null'}`, 'log-info');
     if (kidsVal && kidsVal.startsWith('[')) {
-      // Array of references
       const refs = kidsVal.slice(1, -1).match(/\d+\s+\d+\s+R/g) || [];
-      log(`[DEBUG] Found ${refs.length} kids`, 'log-info');
       for (const ref of refs) {
         const refObj = parseObjectRef(ref);
         if (refObj) {
@@ -1653,8 +1627,6 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
         }
       }
     }
-  } else {
-    log(`[DEBUG] Unknown node type: ${type}`, 'log-err');
   }
 }
 
@@ -1665,74 +1637,48 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
 async function collectPageContent(page, parser, rawPdf) {
   const contents = [];
 
-  log(`[DEBUG] collectPageContent called, page.contents: ${page.contents}`, 'log-info');
-
   if (!page.contents) {
-    log('[DEBUG] page.contents is null/undefined', 'log-info');
     return contents;
   }
 
-  log(`[DEBUG] page.contents type: ${typeof page.contents}, value: ${page.contents.substring(0, 50)}`, 'log-info');
-
   if (page.contents.startsWith('[')) {
     // Array of content streams
-    log('[DEBUG] Contents is array', 'log-info');
     const refs = page.contents.slice(1, -1).match(/\d+\s+\d+\s+R/g) || [];
-    log(`[DEBUG] Found refs: ${refs.length}`, 'log-info');
     for (const ref of refs) {
       const refObj = parseObjectRef(ref);
       if (refObj) {
-        log(`[DEBUG] Processing ref: ${refObj.num} ${refObj.gen}`, 'log-info');
         const offset = parser.offsets.get(refObj.num);
-        log(`[DEBUG] Offset for obj ${refObj.num}: ${offset}`, 'log-info');
-        if (offset === undefined || offset === null) {
-          log(`[DEBUG] No offset found for obj ${refObj.num}`, 'log-err');
-          continue;
-        }
+        if (offset === undefined || offset === null) continue;
         const streamInfo = extractStreamData(rawPdf, offset, parser);
-        log(`[DEBUG] streamInfo: ${streamInfo ? 'found' : 'null'}`, 'log-info');
         if (streamInfo) {
-          log(`[DEBUG] filter: ${streamInfo.filter}, length: ${streamInfo.length}`, 'log-info');
           try {
             const decompressed = await decompressStream(streamInfo);
-            log(`[DEBUG] Decompressed length: ${decompressed ? decompressed.length : 0}`, 'log-info');
             if (decompressed) contents.push(decompressed);
           } catch (e) {
-            log(`[DEBUG] ストリーム解凍失敗: ${e.message}`, 'log-err');
+            log(`ストリーム解凍失敗: ${e.message}`, 'log-err');
           }
         }
       }
     }
   } else {
     // Single content stream
-    log('[DEBUG] Contents is single ref', 'log-info');
     const refObj = parseObjectRef(page.contents);
-    log(`[DEBUG] Parsed ref: ${JSON.stringify(refObj)}`, 'log-info');
     if (refObj) {
       const offset = parser.offsets.get(refObj.num);
-      log(`[DEBUG] Offset for obj ${refObj.num}: ${offset}`, 'log-info');
       if (offset !== undefined && offset !== null) {
         const streamInfo = extractStreamData(rawPdf, offset, parser);
-        log(`[DEBUG] streamInfo: ${streamInfo ? 'found' : 'null'}`, 'log-info');
         if (streamInfo) {
-          log(`[DEBUG] filter: ${streamInfo.filter}, length: ${streamInfo.length}`, 'log-info');
           try {
             const decompressed = await decompressStream(streamInfo);
-            log(`[DEBUG] Decompressed length: ${decompressed ? decompressed.length : 0}`, 'log-info');
             if (decompressed) contents.push(decompressed);
           } catch (e) {
-            log(`[DEBUG] ストリーム解凍失敗: ${e.message}`, 'log-err');
+            log(`ストリーム解凍失敗: ${e.message}`, 'log-err');
           }
         }
-      } else {
-        log(`[DEBUG] No offset found for obj ${refObj.num}`, 'log-err');
       }
-    } else {
-      log(`[DEBUG] Failed to parse ref from: ${page.contents}`, 'log-err');
     }
   }
 
-  log(`[DEBUG] Returning contents count: ${contents.length}`, 'log-info');
   return contents;
 }
 
