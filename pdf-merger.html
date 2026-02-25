@@ -562,158 +562,339 @@ function setProgress(pct, label) {
 }
 
 // ============================================================
-//  SECTION 2: PDF Parser
+//  PHASE 2: PDF Parser (Full Scratch Implementation)
+//  PDF 1.4 format support with XREF table parsing
 // ============================================================
 
+/**
+ * PDFParser - Pure JavaScript PDF structure parser
+ * Parses PDF 1.4 files with traditional cross-reference tables
+ */
 class PDFParser {
   constructor(buffer) {
     this.buf = new Uint8Array(buffer);
     this.str = null;
     this.offsets = new Map();
+    this.trailer = null;
   }
 
-  // Convert bytes to string (chunked to avoid stack overflow)
+  /**
+   * Convert byte buffer to Latin-1 string
+   * Uses chunked processing to avoid stack overflow
+   */
   getString() {
-    if (!this.str) {
-      const CHUNK = 8192;
+    if (this.str === null) {
+      const CHUNK_SIZE = 8192;
       let result = '';
-      for (let i = 0; i < this.buf.length; i += CHUNK) {
-        result += String.fromCharCode(...this.buf.subarray(i, i + CHUNK));
+      for (let i = 0; i < this.buf.length; i += CHUNK_SIZE) {
+        const chunk = this.buf.subarray(i, Math.min(i + CHUNK_SIZE, this.buf.length));
+        result += String.fromCharCode(...chunk);
       }
       this.str = result;
     }
     return this.str;
   }
 
-  // Find startxref position
-  getStartXref() {
+  /**
+   * Verify PDF header and extract version
+   * Returns: { valid: boolean, version: string }
+   */
+  verifyHeader() {
     const s = this.getString();
-    const tail = s.slice(-512);
-    const m = tail.match(/startxref\s+(\d+)\s*%%EOF/);
-    if (!m) throw new Error('startxref not found');
-    return parseInt(m[1]);
+    const headerMatch = s.match(/^%PDF-(\d+\.\d+)/);
+    if (!headerMatch) {
+      return { valid: false, version: null };
+    }
+    return { valid: true, version: headerMatch[1] };
   }
 
-  // Parse XREF table
-  parseXref(offset) {
+  /**
+   * Find the startxref offset from the end of file
+   * PDF stores this as "startxref\n[offset]\n%%EOF"
+   */
+  findStartXref() {
+    const s = this.getString();
+    // Search last 1024 bytes for startxref marker
+    const searchLength = Math.min(1024, s.length);
+    const tail = s.slice(-searchLength);
+    
+    const match = tail.match(/startxref\s+(\d+)\s*%%EOF\s*$/);
+    if (!match) {
+      throw new Error('PDFトレーラーが見つかりません (startxref/%%EOF)');
+    }
+    
+    return parseInt(match[1], 10);
+  }
+
+  /**
+   * Parse the XREF table at given offset
+   * XREF table format:
+   *   xref
+   *   [start] [count]
+   *   [10-digit offset] [5-digit gen] [f/n] ...
+   *   trailer
+   *   << ... >>
+   */
+  parseXrefTable(offset) {
     const s = this.getString();
     let pos = offset;
 
     // Skip whitespace
     while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
 
+    // Verify xref marker
+    if (!s.startsWith('xref', pos)) {
+      throw new Error(`XREFテーブルが見つかりません (オフセット: ${offset})`);
+    }
+    pos += 4;
+
     const offsets = new Map();
 
-    if (s.startsWith('xref', pos)) {
-      pos += 4;
-      while (pos < s.length) {
-        while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
-        const line = this.readLine(s, pos);
-        pos += line.length;
-        if (line.trim() === 'trailer') break;
-        
-        const m = line.trim().match(/^(\d+)\s+(\d+)$/);
-        if (!m) { pos -= line.length; break; }
-        
-        const first = parseInt(m[1]);
-        const count = parseInt(m[2]);
-        
-        for (let i = 0; i < count; i++) {
-          while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
-          const entry = s.slice(pos, pos + 20);
-          pos += 20;
-          const em = entry.match(/^(\d{10})\s+(\d{5})\s+([fn])/);
-          if (em && em[3] === 'f') {
-            offsets.set(first + i, null);
-          } else if (em && em[3] === 'n') {
-            offsets.set(first + i, parseInt(em[1]));
-          }
-        }
+    // Parse each subsection
+    while (pos < s.length) {
+      // Skip whitespace
+      while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+      // Check for trailer end marker
+      const nextLine = this.peekLine(s, pos);
+      if (nextLine.trim() === 'trailer') {
+        pos += nextLine.length;
+        break;
       }
 
-      // Read trailer dict
-      while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
-      const trailerStart = s.indexOf('<<', pos);
-      const trailerEnd = this.findDictEnd(s, trailerStart);
-      
-      return { offsets, trailerStr: s.slice(trailerStart, trailerEnd) };
+      // Parse subsection header: "start count"
+      const subsectionMatch = nextLine.trim().match(/^(\d+)\s+(\d+)$/);
+      if (!subsectionMatch) {
+        // Not a valid subsection header, might be trailer
+        break;
+      }
+      pos += nextLine.length;
+
+      const startNum = parseInt(subsectionMatch[1], 10);
+      const count = parseInt(subsectionMatch[2], 10);
+
+      // Parse entries for this subsection
+      for (let i = 0; i < count; i++) {
+        // Skip whitespace
+        while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+        // Each entry is exactly 20 bytes: "nnnnnnnnnn ggggg n\r"
+        const entry = s.slice(pos, pos + 20);
+        pos += 20;
+
+        const entryMatch = entry.match(/^(\d{10})\s+(\d{5})\s+([fn])\s*/);
+        if (!entryMatch) {
+          console.warn(`Invalid XREF entry at object ${startNum + i}`);
+          continue;
+        }
+
+        const objOffset = parseInt(entryMatch[1], 10);
+        const gen = parseInt(entryMatch[2], 10);
+        const status = entryMatch[3]; // 'n' = in-use, 'f' = free
+
+        if (status === 'n') {
+          offsets.set(startNum + i, objOffset);
+        } else {
+          offsets.set(startNum + i, null); // Free object
+        }
+      }
     }
-    
-    throw new Error('Unknown xref format at ' + offset);
+
+    // Parse trailer dictionary
+    while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+    const trailerStart = s.indexOf('<<', pos);
+    if (trailerStart === -1) {
+      throw new Error('Trailer辞書が見つかりません');
+    }
+
+    const trailerEnd = this.findMatchingDelimiter(s, trailerStart, '<<', '>>');
+    const trailerStr = s.slice(trailerStart, trailerEnd);
+
+    return {
+      offsets,
+      trailer: this.parseTrailer(trailerStr),
+      trailerStr
+    };
   }
 
-  readLine(s, pos) {
+  /**
+   * Parse trailer dictionary for key references
+   */
+  parseTrailer(trailerStr) {
+    const trailer = {};
+
+    // Extract /Size (total object count)
+    const sizeMatch = trailerStr.match(/\/Size\s+(\d+)/);
+    if (sizeMatch) trailer.size = parseInt(sizeMatch[1], 10);
+
+    // Extract /Root (document catalog reference)
+    const rootMatch = trailerStr.match(/\/Root\s+(\d+)\s+(\d+)\s+R/);
+    if (rootMatch) {
+      trailer.root = {
+        num: parseInt(rootMatch[1], 10),
+        gen: parseInt(rootMatch[2], 10)
+      };
+    }
+
+    // Extract /Info (document info reference)
+    const infoMatch = trailerStr.match(/\/Info\s+(\d+)\s+(\d+)\s+R/);
+    if (infoMatch) {
+      trailer.info = {
+        num: parseInt(infoMatch[1], 10),
+        gen: parseInt(infoMatch[2], 10)
+      };
+    }
+
+    return trailer;
+  }
+
+  /**
+   * Rebuild XREF table by scanning for "N G obj" patterns
+   * Used as fallback when XREF table is corrupted/missing
+   */
+  rebuildXrefFromScan() {
+    const s = this.getString();
+    const offsets = new Map();
+
+    // Pattern: "N G obj" where N=object number, G=generation
+    const objPattern = /(\d+)\s+(\d+)\s+obj/g;
+    let match;
+
+    while ((match = objPattern.exec(s)) !== null) {
+      const objNum = parseInt(match[1], 10);
+      const offset = match.index;
+      offsets.set(objNum, offset);
+    }
+
+    // Try to find trailer
+    let trailerStr = '';
+    const trailerPos = s.lastIndexOf('trailer');
+    if (trailerPos !== -1) {
+      const dictStart = s.indexOf('<<', trailerPos);
+      if (dictStart !== -1) {
+        const dictEnd = this.findMatchingDelimiter(s, dictStart, '<<', '>>');
+        trailerStr = s.slice(dictStart, dictEnd);
+      }
+    }
+
+    return {
+      offsets,
+      trailer: trailerStr ? this.parseTrailer(trailerStr) : {},
+      trailerStr
+    };
+  }
+
+  /**
+   * Get object body by object number
+   * Looks up offset from XREF table and extracts content
+   */
+  getObject(objNum) {
+    const offset = this.offsets.get(objNum);
+    if (offset === undefined || offset === null) {
+      return null;
+    }
+
+    const s = this.getString();
+    return this.parseObjectAtOffset(s, offset);
+  }
+
+  /**
+   * Parse object at specific byte offset
+   * Format: "num gen obj\n...content...\nendobj"
+   */
+  parseObjectAtOffset(s, offset) {
+    // Find " obj" marker
+    const objMarker = s.indexOf(' obj', offset);
+    if (objMarker === -1) {
+      return null;
+    }
+
+    let pos = objMarker + 4;
+
+    // Skip whitespace after " obj"
+    while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+    // Find endobj marker
+    const endPos = s.indexOf('endobj', pos);
+    if (endPos === -1) {
+      return null;
+    }
+
+    const body = s.slice(pos, endPos).trim();
+
+    return {
+      body,
+      start: offset,
+      end: endPos + 6
+    };
+  }
+
+  /**
+   * Main parse method - orchestrates full PDF parsing
+   */
+  parse() {
+    // Verify PDF header
+    const header = this.verifyHeader();
+    if (!header.valid) {
+      throw new Error('有効なPDFファイルではありません (ヘッダーが見つかりません)');
+    }
+
+    // Find and parse XREF
+    let xrefResult;
+    try {
+      const startXref = this.findStartXref();
+      xrefResult = this.parseXrefTable(startXref);
+    } catch (e) {
+      console.warn('XREFテーブルの解析に失敗、スキャンで再構築します:', e.message);
+      xrefResult = this.rebuildXrefFromScan();
+    }
+
+    this.offsets = xrefResult.offsets;
+    this.trailer = xrefResult.trailer;
+
+    return {
+      version: header.version,
+      offsets: this.offsets,
+      trailer: this.trailer,
+      objCount: this.offsets.size
+    };
+  }
+
+  // ============================================================
+  //  Helper Methods
+  // ============================================================
+
+  peekLine(s, pos) {
     let end = pos;
     while (end < s.length && s[end] !== '\n' && s[end] !== '\r') end++;
-    if (s[end] === '\r' && s[end + 1] === '\n') end += 2;
-    else if (end < s.length) end++;
+    if (s[end] === '\r' && s[end + 1] === '\n') {
+      end += 2;
+    } else if (end < s.length) {
+      end++;
+    }
     return s.slice(pos, end);
   }
 
-  findDictEnd(s, startPos) {
+  findMatchingDelimiter(s, startPos, openDelim, closeDelim) {
+    const openLen = openDelim.length;
+    const closeLen = closeDelim.length;
     let depth = 0;
     let i = startPos;
-    while (i < s.length) {
-      if (s[i] === '<' && s[i + 1] === '<') { depth++; i += 2; }
-      else if (s[i] === '>' && s[i + 1] === '>') { depth--; i += 2; if (depth === 0) return i; }
-      else i++;
+
+    while (i < s.length - closeLen + 1) {
+      if (s.slice(i, i + openLen) === openDelim) {
+        depth++;
+        i += openLen;
+      } else if (s.slice(i, i + closeLen) === closeDelim) {
+        depth--;
+        i += closeLen;
+        if (depth === 0) return i;
+      } else {
+        i++;
+      }
     }
     return i;
-  }
-
-  getObjectBytes(offset) {
-    const s = this.getString();
-    const objStart = s.indexOf(' obj', offset) + 4;
-    let pos = objStart;
-    while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
-
-    const endobj = s.indexOf('endobj', pos);
-    return { objBody: s.slice(pos, endobj).trim(), endPos: endobj + 6 };
-  }
-
-  parseTrailerDict(trailerStr) {
-    const root = this.getDictRef(trailerStr, 'Root');
-    const info = this.getDictRef(trailerStr, 'Info');
-    return { root, info };
-  }
-
-  getDictRef(dict, key) {
-    const m = dict.match(new RegExp('/' + key + '\\s+(\\d+)\\s+(\\d+)\\s+R'));
-    if (!m) return null;
-    return { num: parseInt(m[1]), gen: parseInt(m[2]) };
-  }
-
-  parse() {
-    let xrefOffset = this.getStartXref();
-    let result;
-    try {
-      result = this.parseXref(xrefOffset);
-    } catch (e) {
-      result = this.rebuildXref();
-    }
-    const { offsets, trailerStr } = result;
-    const trailer = this.parseTrailerDict(trailerStr);
-    this.offsets = offsets;
-    return { offsets, trailer };
-  }
-
-  rebuildXref() {
-    const s = this.getString();
-    const offsets = new Map();
-    const re = /(\d+)\s+(\d+)\s+obj/g;
-    let m;
-    while ((m = re.exec(s)) !== null) {
-      offsets.set(parseInt(m[1]), m.index);
-    }
-    
-    let trailerPos = s.lastIndexOf('trailer');
-    let trailerStr = '';
-    if (trailerPos >= 0) {
-      const ds = s.indexOf('<<', trailerPos);
-      const de = this.findDictEnd(s, ds);
-      trailerStr = s.slice(ds, de);
-    }
-    return { offsets, trailerStr };
   }
 }
 
