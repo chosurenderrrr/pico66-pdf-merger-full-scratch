@@ -314,7 +314,7 @@
 
 <header>
   <h1>PDF MERGER</h1>
-  <p>pdf-merger-js を使用 <span class="badge">Browser</span></p>
+  <p>外部ライブラリ不使用 — フルスクラッチ実装 <span class="badge">Pure JS</span></p>
 </header>
 
 <div class="card">
@@ -347,23 +347,13 @@
 
 <footer>すべての処理はブラウザ内で行われます。ファイルはサーバーにアップロードされません。</footer>
 
-<script type="module">
+<script>
 // ============================================================
-//  PDF Merger using pdf-merger-js
-//  Using unpkg CDN: https://unpkg.com/pdf-merger-js@4.3.0/dist/index.js
+//  PURE JS PDF MERGER — NO EXTERNAL LIBRARIES
+//  Full scratch implementation for PDF merging
 // ============================================================
 
-let PDFMerger = null;
-
-// ライブラリの動的インポート
-try {
-  const module = await import('https://cdn.jsdelivr.net/npm/pdf-merger-js@5.1.2/+esm');
-  PDFMerger = module.default || module.PDFMerger || module;
-  console.log('PDFMerger loaded successfully:', PDFMerger);
-} catch (e) {
-  console.error('Failed to load PDFMerger:', e);
-}
-
+// ---- UI Elements ----
 const fileInput = document.getElementById('fileInput');
 const dropZone = document.getElementById('dropZone');
 const fileListEl = document.getElementById('fileList');
@@ -377,10 +367,10 @@ const logEl = document.getElementById('log');
 
 let files = []; // { file, name, size }
 
-// ---- デバッグ用 ----
-console.log('Script loaded, PDFMerger:', PDFMerger);
+// ============================================================
+//  SECTION 1: UI Event Handlers
+// ============================================================
 
-// ---- ドラッグ＆ドロップ ----
 dropZone.addEventListener('dragover', e => { 
   e.preventDefault(); 
   dropZone.classList.add('drag-over'); 
@@ -393,19 +383,14 @@ dropZone.addEventListener('dragleave', () => {
 dropZone.addEventListener('drop', e => {
   e.preventDefault();
   e.stopPropagation();
-  console.log('Drop event:', e.dataTransfer.files);
   dropZone.classList.remove('drag-over');
   const pdfFiles = [...e.dataTransfer.files].filter(f => 
     f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
   );
-  console.log('Filtered PDF files:', pdfFiles);
-  if (pdfFiles.length > 0) {
-    addFiles(pdfFiles);
-  }
+  if (pdfFiles.length > 0) addFiles(pdfFiles);
 });
 
-fileInput.addEventListener('change', (e) => { 
-  console.log('File input change:', fileInput.files);
+fileInput.addEventListener('change', () => { 
   if (fileInput.files.length > 0) {
     addFiles([...fileInput.files]); 
   }
@@ -413,17 +398,14 @@ fileInput.addEventListener('change', (e) => {
 });
 
 function addFiles(newFiles) {
-  console.log('Adding files:', newFiles);
   const pdfFiles = newFiles.filter(f => 
     f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
   );
   pdfFiles.forEach(f => files.push({ file: f, name: f.name, size: f.size }));
-  console.log('Current files:', files);
   renderList();
 }
 
 function renderList() {
-  console.log('Rendering list, files count:', files.length);
   fileListEl.innerHTML = '';
   files.forEach((item, i) => {
     const el = document.createElement('div');
@@ -452,7 +434,6 @@ function renderList() {
   orderHint.style.display = files.length >= 2 ? '' : 'none';
 }
 
-// ---- ドラッグで並び替え ----
 let dragSrc = null;
 function setupDragSort() {
   fileListEl.querySelectorAll('.file-item').forEach(item => {
@@ -487,7 +468,6 @@ function escHtml(s) {
   }[c])); 
 }
 
-// ---- ログ出力 ----
 function log(msg, cls = '') {
   logEl.classList.add('active');
   const line = document.createElement('div');
@@ -504,58 +484,679 @@ function setProgress(pct, label) {
 }
 
 // ============================================================
-//  PDF 結合処理（pdf-merger-js使用）
+//  SECTION 2: PDF Parser
 // ============================================================
 
-async function mergePDFs(fileItems) {
-  if (!PDFMerger) {
-    throw new Error('PDFMergerライブラリが読み込まれていません。ページを再読み込みしてください。');
+class PDFParser {
+  constructor(buffer) {
+    this.buf = new Uint8Array(buffer);
+    this.str = null;
+    this.offsets = new Map();
   }
 
-  log('PDF結合を開始します', 'log-info');
-  setProgress(10, '初期化中...');
-
-  const merger = new PDFMerger();
-
-  for (let i = 0; i < fileItems.length; i++) {
-    const item = fileItems[i];
-    const progress = 20 + Math.round((i / fileItems.length) * 60);
-    setProgress(progress, `読み込み中: ${item.name}`);
-    log(`[${i + 1}/${fileItems.length}] 読み込み: ${item.name}`);
-
-    try {
-      const arrayBuffer = await item.file.arrayBuffer();
-      await merger.add(arrayBuffer);
-      log(`  → 追加完了`, 'log-ok');
-    } catch (e) {
-      log(`  ✗ エラー: ${e.message}`, 'log-err');
-      throw new Error(`${item.name} の追加に失敗: ${e.message}`);
+  // Convert bytes to string (chunked to avoid stack overflow)
+  getString() {
+    if (!this.str) {
+      const CHUNK = 8192;
+      let result = '';
+      for (let i = 0; i < this.buf.length; i += CHUNK) {
+        result += String.fromCharCode(...this.buf.subarray(i, i + CHUNK));
+      }
+      this.str = result;
     }
+    return this.str;
   }
 
-  setProgress(90, 'PDFを生成中...');
-  log('結合したPDFを生成しています...', 'log-info');
+  // Find startxref position
+  getStartXref() {
+    const s = this.getString();
+    const tail = s.slice(-512);
+    const m = tail.match(/startxref\s+(\d+)\s*%%EOF/);
+    if (!m) throw new Error('startxref not found');
+    return parseInt(m[1]);
+  }
 
-  try {
-    const mergedPdf = await merger.saveAsBuffer();
-    setProgress(100, '完成！');
-    log('結合完了！', 'log-ok');
-    return mergedPdf;
-  } catch (e) {
-    log(`  ✗ 生成エラー: ${e.message}`, 'log-err');
-    throw new Error(`PDF生成に失敗: ${e.message}`);
+  // Parse XREF table
+  parseXref(offset) {
+    const s = this.getString();
+    let pos = offset;
+
+    // Skip whitespace
+    while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+    const offsets = new Map();
+
+    if (s.startsWith('xref', pos)) {
+      pos += 4;
+      while (pos < s.length) {
+        while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+        const line = this.readLine(s, pos);
+        pos += line.length;
+        if (line.trim() === 'trailer') break;
+        
+        const m = line.trim().match(/^(\d+)\s+(\d+)$/);
+        if (!m) { pos -= line.length; break; }
+        
+        const first = parseInt(m[1]);
+        const count = parseInt(m[2]);
+        
+        for (let i = 0; i < count; i++) {
+          while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+          const entry = s.slice(pos, pos + 20);
+          pos += 20;
+          const em = entry.match(/^(\d{10})\s+(\d{5})\s+([fn])/);
+          if (em && em[3] === 'f') {
+            offsets.set(first + i, null);
+          } else if (em && em[3] === 'n') {
+            offsets.set(first + i, parseInt(em[1]));
+          }
+        }
+      }
+
+      // Read trailer dict
+      while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+      const trailerStart = s.indexOf('<<', pos);
+      const trailerEnd = this.findDictEnd(s, trailerStart);
+      
+      return { offsets, trailerStr: s.slice(trailerStart, trailerEnd) };
+    }
+    
+    throw new Error('Unknown xref format at ' + offset);
+  }
+
+  readLine(s, pos) {
+    let end = pos;
+    while (end < s.length && s[end] !== '\n' && s[end] !== '\r') end++;
+    if (s[end] === '\r' && s[end + 1] === '\n') end += 2;
+    else if (end < s.length) end++;
+    return s.slice(pos, end);
+  }
+
+  findDictEnd(s, startPos) {
+    let depth = 0;
+    let i = startPos;
+    while (i < s.length) {
+      if (s[i] === '<' && s[i + 1] === '<') { depth++; i += 2; }
+      else if (s[i] === '>' && s[i + 1] === '>') { depth--; i += 2; if (depth === 0) return i; }
+      else i++;
+    }
+    return i;
+  }
+
+  getObjectBytes(offset) {
+    const s = this.getString();
+    const objStart = s.indexOf(' obj', offset) + 4;
+    let pos = objStart;
+    while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+    const endobj = s.indexOf('endobj', pos);
+    return { objBody: s.slice(pos, endobj).trim(), endPos: endobj + 6 };
+  }
+
+  parseTrailerDict(trailerStr) {
+    const root = this.getDictRef(trailerStr, 'Root');
+    const info = this.getDictRef(trailerStr, 'Info');
+    return { root, info };
+  }
+
+  getDictRef(dict, key) {
+    const m = dict.match(new RegExp('/' + key + '\\s+(\\d+)\\s+(\\d+)\\s+R'));
+    if (!m) return null;
+    return { num: parseInt(m[1]), gen: parseInt(m[2]) };
+  }
+
+  parse() {
+    let xrefOffset = this.getStartXref();
+    let result;
+    try {
+      result = this.parseXref(xrefOffset);
+    } catch (e) {
+      result = this.rebuildXref();
+    }
+    const { offsets, trailerStr } = result;
+    const trailer = this.parseTrailerDict(trailerStr);
+    this.offsets = offsets;
+    return { offsets, trailer };
+  }
+
+  rebuildXref() {
+    const s = this.getString();
+    const offsets = new Map();
+    const re = /(\d+)\s+(\d+)\s+obj/g;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      offsets.set(parseInt(m[1]), m.index);
+    }
+    
+    let trailerPos = s.lastIndexOf('trailer');
+    let trailerStr = '';
+    if (trailerPos >= 0) {
+      const ds = s.indexOf('<<', trailerPos);
+      const de = this.findDictEnd(s, ds);
+      trailerStr = s.slice(ds, de);
+    }
+    return { offsets, trailerStr };
   }
 }
 
 // ============================================================
-//  UI イベント
+//  SECTION 3: ZLIB/DEFLATE Decompression
 // ============================================================
-mergeBtn.addEventListener('click', async () => {
-  if (!PDFMerger) {
-    alert('PDFMergerライブラリが読み込まれていません。ページを再読み込みしてください。');
-    return;
+
+class BitStream {
+  constructor(data) {
+    this.data = data;
+    this.pos = 0;
+    this.bitBuf = 0;
+    this.bitLen = 0;
   }
 
+  _fill(n) {
+    while (this.bitLen < n && this.pos < this.data.length) {
+      this.bitBuf |= this.data[this.pos++] << this.bitLen;
+      this.bitLen += 8;
+    }
+  }
+
+  readBits(n) {
+    this._fill(n);
+    const v = this.bitBuf & ((1 << n) - 1);
+    this.bitBuf >>>= n;
+    this.bitLen -= n;
+    return v;
+  }
+
+  peekBits(n) {
+    this._fill(n);
+    return this.bitBuf & ((1 << n) - 1);
+  }
+
+  skipBits(n) {
+    this.bitBuf >>>= n;
+    this.bitLen -= n;
+  }
+
+  readByte() {
+    this.align();
+    return this.pos < this.data.length ? this.data[this.pos++] : 0;
+  }
+
+  readUint16LE() {
+    return this.readByte() | (this.readByte() << 8);
+  }
+
+  align() {
+    this.bitBuf = 0;
+    this.bitLen = 0;
+  }
+}
+
+function buildTree(lengths) {
+  const maxLen = lengths.length === 0 ? 0 : Math.max(...lengths);
+  if (maxLen === 0) return { table: new Int32Array(0), maxLen: 0 };
+
+  const blCount = new Array(maxLen + 1).fill(0);
+  for (const l of lengths) if (l > 0) blCount[l]++;
+
+  const nextCode = new Array(maxLen + 2).fill(0);
+  for (let bits = 1; bits <= maxLen; bits++) {
+    nextCode[bits + 1] = (nextCode[bits] + blCount[bits]) << 1;
+  }
+
+  const tableSize = 1 << maxLen;
+  const table = new Int32Array(tableSize).fill(-1);
+
+  for (let i = 0; i < lengths.length; i++) {
+    const len = lengths[i];
+    if (len === 0) continue;
+    const code = nextCode[len]++;
+    const fill = maxLen - len;
+    const base = code << fill;
+    const count = 1 << fill;
+    const val = (i << 5) | len;
+    for (let j = 0; j < count; j++) table[base + j] = val;
+  }
+
+  return { table, maxLen };
+}
+
+function decodeSymbol(bs, tree) {
+  const { table, maxLen } = tree;
+  const code = bs.peekBits(maxLen);
+  const entry = table[code];
+  if (entry < 0) throw new Error('Invalid Huffman code');
+  const len = entry & 0x1f;
+  const sym = entry >> 5;
+  bs.skipBits(len);
+  return sym;
+}
+
+function fixedLitLenTree() {
+  const lens = [];
+  for (let i = 0; i <= 287; i++) {
+    if (i <= 143) lens.push(8);
+    else if (i <= 255) lens.push(9);
+    else if (i <= 279) lens.push(7);
+    else lens.push(8);
+  }
+  return buildTree(lens);
+}
+
+function fixedDistTree() {
+  return buildTree(new Array(32).fill(5));
+}
+
+function readDynamicTrees(bs) {
+  const hlit = bs.readBits(5) + 257;
+  const hdist = bs.readBits(5) + 1;
+  const hclen = bs.readBits(4) + 4;
+  const codeLenOrder = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+  const codeLenLens = new Array(19).fill(0);
+  for (let i = 0; i < hclen; i++) codeLenLens[codeLenOrder[i]] = bs.readBits(3);
+  const clTree = buildTree(codeLenLens);
+  const lengths = [];
+  while (lengths.length < hlit + hdist) {
+    const sym = decodeSymbol(bs, clTree);
+    if (sym < 16) lengths.push(sym);
+    else if (sym === 16) {
+      const rep = bs.readBits(2) + 3;
+      for (let i = 0; i < rep; i++) lengths.push(lengths[lengths.length - 1]);
+    } else if (sym === 17) {
+      const rep = bs.readBits(3) + 3;
+      for (let i = 0; i < rep; i++) lengths.push(0);
+    } else {
+      const rep = bs.readBits(7) + 11;
+      for (let i = 0; i < rep; i++) lengths.push(0);
+    }
+  }
+  return {
+    litLenTree: buildTree(lengths.slice(0, hlit)),
+    distTree: buildTree(lengths.slice(hlit))
+  };
+}
+
+function inflateBlock(bs, out, litLenTree, distTree) {
+  const lenExtra = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  const lenBase = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  const distExtra = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+  const distBase = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+
+  while (true) {
+    const sym = decodeSymbol(bs, litLenTree);
+    if (sym === 256) break;
+    if (sym < 256) {
+      out.push(sym);
+    } else {
+      const li = sym - 257;
+      const length = lenBase[li] + bs.readBits(lenExtra[li]);
+      const di = decodeSymbol(bs, distTree);
+      const dist = distBase[di] + bs.readBits(distExtra[di]);
+      const start = out.length - dist;
+      for (let i = 0; i < length; i++) out.push(out[start + i]);
+    }
+  }
+}
+
+function inflate(data) {
+  const bs = new BitStream(data);
+  const out = [];
+
+  let bFinal = 0;
+  while (!bFinal) {
+    bFinal = bs.readBits(1);
+    const bType = bs.readBits(2);
+    if (bType === 0) {
+      // No compression
+      bs.align();
+      const len = bs.readUint16LE();
+      const nlen = bs.readUint16LE();
+      for (let i = 0; i < len; i++) out.push(bs.readByte());
+    } else if (bType === 1) {
+      // Fixed Huffman
+      inflateBlock(bs, out, fixedLitLenTree(), fixedDistTree());
+    } else if (bType === 2) {
+      // Dynamic Huffman
+      const { litLenTree, distTree } = readDynamicTrees(bs);
+      inflateBlock(bs, out, litLenTree, distTree);
+    } else {
+      throw new Error('Invalid btype');
+    }
+  }
+  return new Uint8Array(out);
+}
+
+function zlibInflate(data) {
+  // Skip 2-byte zlib header (CMF, FLG)
+  return inflate(data.slice(2));
+}
+
+// ============================================================
+//  SECTION 4: PDF Merge Logic
+// ============================================================
+
+function extractDictValue(dict, key) {
+  const re = new RegExp('/' + key + '\\s+');
+  const m = re.exec(dict);
+  if (!m) return null;
+  const rest = dict.slice(m.index + m[0].length);
+  
+  if (rest.startsWith('<<')) {
+    let depth = 0, i = 0;
+    while (i < rest.length) {
+      if (rest[i] === '<' && rest[i + 1] === '<') { depth++; i += 2; }
+      else if (rest[i] === '>' && rest[i + 1] === '>') { depth--; i += 2; if (depth === 0) return rest.slice(0, i); }
+      else i++;
+    }
+    return rest.slice(0, i);
+  }
+  
+  if (rest.startsWith('[')) {
+    let depth = 0, i = 0;
+    while (i < rest.length) {
+      if (rest[i] === '[') depth++;
+      else if (rest[i] === ']') { depth--; if (depth === 0) return rest.slice(0, i + 1); }
+      i++;
+    }
+  }
+  
+  const vm = rest.match(/^[\d\s]+R|^\/\S+|^\S+/);
+  return vm ? vm[0] : null;
+}
+
+function parseRef(str) {
+  if (!str) return null;
+  const m = str.trim().match(/^(\d+)\s+(\d+)\s+R/);
+  if (!m) return null;
+  return { num: parseInt(m[1]), gen: parseInt(m[2]) };
+}
+
+function extractStream(raw, offset, parser) {
+  const s = raw;
+  const objStart = s.indexOf(' obj', offset) + 4;
+  let pos = objStart;
+  while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+  const dictEnd = parser.findDictEnd(s, pos);
+  const dictStr = s.slice(pos, dictEnd);
+
+  const lengthVal = extractDictValue(dictStr, 'Length');
+  const filterVal = extractDictValue(dictStr, 'Filter');
+
+  let streamPos = s.indexOf('stream', dictEnd);
+  if (streamPos < 0) return null;
+  streamPos += 6;
+  if (s[streamPos] === '\r') streamPos++;
+  if (s[streamPos] === '\n') streamPos++;
+
+  let endStream = s.indexOf('endstream', streamPos);
+  if (endStream < 0) return null;
+
+  const streamData = s.slice(streamPos, endStream);
+  return { dictStr, streamData, filterVal };
+}
+
+function decompressStream(streamData, filterVal) {
+  if (!filterVal || !filterVal.includes('FlateDecode')) {
+    return streamData;
+  }
+  
+  const bytes = Uint8Array.from(streamData, c => c.charCodeAt(0));
+  try {
+    const decoded = zlibInflate(bytes);
+    // Convert back to string
+    const CHUNK = 8192;
+    let result = '';
+    for (let i = 0; i < decoded.length; i += CHUNK) {
+      result += String.fromCharCode(...decoded.subarray(i, i + CHUNK));
+    }
+    return result;
+  } catch (e) {
+    // Return original if decompression fails
+    return streamData;
+  }
+}
+
+async function mergePDFs(fileItems) {
+  log('PDF結合を開始します', 'log-info');
+  
+  const parsedPDFs = [];
+  
+  // Parse all PDFs
+  for (let i = 0; i < fileItems.length; i++) {
+    const item = fileItems[i];
+    setProgress(Math.round((i / fileItems.length) * 30), `読み込み中: ${item.name}`);
+    log(`[${i + 1}/${fileItems.length}] 読み込み: ${item.name}`);
+    
+    const buf = await item.file.arrayBuffer();
+    const parser = new PDFParser(buf);
+    
+    try {
+      const { offsets, trailer } = parser.parse();
+      parsedPDFs.push({ parser, offsets, trailer, name: item.name, raw: parser.getString() });
+      log(`  → ${offsets.size} オブジェクト検出`, 'log-ok');
+    } catch (e) {
+      log(`  ✗ パースエラー: ${e.message}`, 'log-err');
+      throw new Error(`${item.name} の解析に失敗: ${e.message}`);
+    }
+  }
+  
+  setProgress(35, 'ページを収集中...');
+  
+  // Collect pages from all PDFs
+  const allPages = [];
+  
+  for (let fi = 0; fi < parsedPDFs.length; fi++) {
+    const { parser, offsets, raw } = parsedPDFs[fi];
+    setProgress(35 + Math.round((fi / parsedPDFs.length) * 35), `ページ収集: ${parsedPDFs[fi].name}`);
+    
+    // Find all page objects
+    const pageObjects = [];
+    for (const [num, offset] of offsets) {
+      if (offset === null) continue;
+      const { objBody } = parser.getObjectBytes(offset);
+      // Check for /Type /Page but not /Type /Pages
+      if (objBody.includes('/Type') && objBody.includes('/Page') && !objBody.includes('/Pages')) {
+        pageObjects.push({ num, offset, body: objBody });
+      }
+    }
+    
+    // Try to get proper order from /Pages tree
+    const orderedPages = getSortedPages(parser, offsets, pageObjects, raw);
+    log(`  → ${orderedPages.length} ページ検出`, 'log-ok');
+    
+    for (const pg of orderedPages) {
+      allPages.push({ 
+        raw, 
+        parser, 
+        offsets, 
+        pageBody: pg.body, 
+        pageNum: pg.num 
+      });
+    }
+  }
+  
+  setProgress(75, '新しいPDFを構築中...');
+  log('新しいPDFを構築しています...', 'log-info');
+  
+  // Build merged PDF
+  const pdfBytes = buildMergedPDF(allPages);
+  
+  setProgress(100, '完成！');
+  log('結合完了！', 'log-ok');
+  
+  return pdfBytes;
+}
+
+function getSortedPages(parser, offsets, pageObjects, raw) {
+  // Try to find /Pages dict and read /Kids array for proper ordering
+  const s = raw;
+  const pagesObjMatch = s.match(/\d+\s+\d+\s+obj\s*<<[^>]*\/Type\s*\/Pages[^>]*>>/g);
+  if (pagesObjMatch) {
+    const kidsMatch = pagesObjMatch[0].match(/\/Kids\s*\[([\d\s\nR]+)\]/);
+    if (kidsMatch) {
+      const refs = kidsMatch[1].trim().split(/\s+R\s*/).filter(r => r.trim()).map(r => parseInt(r.trim().split(/\s+/)[0]));
+      const sorted = [];
+      for (const ref of refs) {
+        const found = pageObjects.find(p => p.num === ref);
+        if (found) sorted.push(found);
+      }
+      if (sorted.length > 0) return sorted;
+    }
+  }
+  // Fallback: sort by object number
+  return pageObjects.sort((a, b) => a.num - b.num);
+}
+
+function buildMergedPDF(allPages) {
+  const enc = new TextEncoder();
+  const parts = [];
+  let pos = 0;
+
+  function write(s) {
+    const b = typeof s === 'string' ? enc.encode(s) : s;
+    parts.push(b);
+    pos += b.length;
+  }
+
+  // Header
+  write('%PDF-1.4\n');
+  write('%\xE2\xE3\xCF\xD3\n');
+
+  // Object numbering:
+  // 1 = Catalog
+  // 2 = Pages
+  // 3..N = page objects and content streams
+  let nextObjNum = 3;
+  const pageObjNums = [];
+  const pendingObjs = [];
+
+  for (const page of allPages) {
+    const { raw, parser, offsets, pageBody } = page;
+    
+    // Extract page properties
+    const mediaBox = extractDictValue(pageBody, 'MediaBox') || '[0 0 595 842]';
+    const contentsRef = extractDictValue(pageBody, 'Contents');
+    const resourcesVal = extractDictValue(pageBody, 'Resources');
+    
+    // Process content stream
+    let contentObjNum = null;
+    if (contentsRef) {
+      const streamParts = [];
+      const refs = [];
+      
+      if (contentsRef.trim().startsWith('[')) {
+        // Array of refs
+        const inner = contentsRef.slice(1, contentsRef.lastIndexOf(']'));
+        const matches = inner.matchAll(/(\d+)\s+\d+\s+R/g);
+        for (const m of matches) refs.push(parseInt(m[1]));
+      } else {
+        const r = parseRef(contentsRef);
+        if (r) refs.push(r.num);
+      }
+      
+      // Collect and decompress all streams
+      for (const refNum of refs) {
+        if (!offsets.has(refNum)) continue;
+        const offset = offsets.get(refNum);
+        if (offset === null) continue;
+        
+        const streamInfo = extractStream(raw, offset, parser);
+        if (streamInfo) {
+          const decompressed = decompressStream(streamInfo.streamData, streamInfo.filterVal);
+          streamParts.push(decompressed);
+        }
+      }
+      
+      if (streamParts.length > 0) {
+        const combinedContent = streamParts.join('\n');
+        contentObjNum = nextObjNum++;
+        pendingObjs.push({
+          num: contentObjNum,
+          data: `<< /Length ${combinedContent.length} >>\nstream\n${combinedContent}\nendstream`
+        });
+      }
+    }
+    
+    // Process resources
+    let resourcesStr = '/Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] >>';
+    if (resourcesVal) {
+      if (resourcesVal.trim().startsWith('<<')) {
+        resourcesStr = '/Resources ' + resourcesVal;
+      } else {
+        const rRef = parseRef(resourcesVal);
+        if (rRef && offsets.has(rRef.num)) {
+          const rOffset = offsets.get(rRef.num);
+          if (rOffset !== null) {
+            const { objBody } = parser.getObjectBytes(rOffset);
+            if (objBody.trim().startsWith('<<')) {
+              resourcesStr = '/Resources ' + objBody;
+            }
+          }
+        }
+      }
+    }
+    
+    // Create page object
+    const pageObjNum = nextObjNum++;
+    pageObjNums.push(pageObjNum);
+    
+    let pageDict = `<< /Type /Page /Parent 2 0 R\n`;
+    pageDict += `/MediaBox ${mediaBox}\n`;
+    pageDict += `${resourcesStr}\n`;
+    if (contentObjNum) pageDict += `/Contents ${contentObjNum} 0 R\n`;
+    pageDict += `>>`;
+    
+    pendingObjs.push({ num: pageObjNum, data: pageDict });
+  }
+
+  // Build all objects
+  const allObjs = [
+    { num: 1, data: `<< /Type /Catalog /Pages 2 0 R >>` },
+    { num: 2, data: `<< /Type /Pages /Kids [${pageObjNums.map(n => n + ' 0 R').join(' ')}] /Count ${pageObjNums.length} >>` },
+    ...pendingObjs
+  ].sort((a, b) => a.num - b.num);
+
+  // Write objects and track offsets
+  const xrefOffsets = new Map();
+  for (const obj of allObjs) {
+    xrefOffsets.set(obj.num, pos);
+    write(`${obj.num} 0 obj\n${obj.data}\nendobj\n`);
+  }
+
+  // XREF table
+  const xrefPos = pos;
+  const maxObj = Math.max(...xrefOffsets.keys());
+  write(`xref\n0 ${maxObj + 1}\n`);
+  write(`0000000000 65535 f \n`);
+  for (let i = 1; i <= maxObj; i++) {
+    if (xrefOffsets.has(i)) {
+      write((xrefOffsets.get(i) + '').padStart(10, '0') + ' 00000 n \n');
+    } else {
+      write(`0000000000 65535 f \n`);
+    }
+  }
+
+  // Trailer
+  write(`trailer\n<< /Size ${maxObj + 1} /Root 1 0 R >>\n`);
+  write(`startxref\n${xrefPos}\n%%EOF\n`);
+
+  // Combine all parts
+  let totalLen = 0;
+  for (const p of parts) totalLen += p.length;
+  const result = new Uint8Array(totalLen);
+  let off = 0;
+  for (const p of parts) {
+    result.set(p, off);
+    off += p.length;
+  }
+  return result;
+}
+
+// ============================================================
+//  SECTION 5: Main Entry Point
+// ============================================================
+
+mergeBtn.addEventListener('click', async () => {
   mergeBtn.disabled = true;
   logEl.innerHTML = '';
   logEl.classList.add('active');
