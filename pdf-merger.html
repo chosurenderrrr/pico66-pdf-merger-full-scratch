@@ -628,6 +628,7 @@ class PDFParser {
 
   /**
    * Parse the XREF table at given offset
+   * Supports both traditional XREF table and XREF stream (PDF 1.5+)
    * XREF table format:
    *   xref
    *   [start] [count]
@@ -641,6 +642,14 @@ class PDFParser {
 
     // Skip whitespace
     while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+    // Check if this is an XREF stream (PDF 1.5+) instead of traditional XREF table
+    // XREF stream starts with "N G obj" not "xref"
+    const objHeaderMatch = s.slice(pos, pos + 30).match(/^(\d+)\s+(\d+)\s+obj/);
+    if (objHeaderMatch) {
+      console.log(`[PDF] XREFストリームを検出 (PDF 1.5+): ${objHeaderMatch[1]} ${objHeaderMatch[2]} obj`);
+      return this.parseXrefStream(pos);
+    }
 
     // Verify xref marker
     if (!s.startsWith('xref', pos)) {
@@ -715,6 +724,158 @@ class PDFParser {
       offsets,
       trailer: this.parseTrailer(trailerStr),
       trailerStr
+    };
+  }
+
+  /**
+   * Parse XREF stream (PDF 1.5+)
+   * XREF stream is an object with /Type /XRef containing binary data
+   */
+  parseXrefStream(offset) {
+    const s = this.getString();
+    
+    // Parse the XREF stream object
+    const obj = this.parseObjectAtOffset(s, offset);
+    if (!obj) {
+      throw new Error('XREFストリームオブジェクトの解析に失敗');
+    }
+
+    const body = obj.body;
+    
+    // Check Type
+    if (!body.includes('/Type') || !body.includes('/XRef')) {
+      throw new Error('XREFストリームオブジェクトではありません');
+    }
+
+    // Extract /Size
+    const sizeMatch = body.match(/\/Size\s+(\d+)/);
+    const size = sizeMatch ? parseInt(sizeMatch[1], 10) : 0;
+
+    // Extract /W (width array)
+    const wMatch = body.match(/\/W\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s*\]/);
+    if (!wMatch) {
+      throw new Error('XREFストリームに/Wが見つかりません');
+    }
+    const w1 = parseInt(wMatch[1], 10); // field 1 size (type)
+    const w2 = parseInt(wMatch[2], 10); // field 2 size (offset/objnum)
+    const w3 = parseInt(wMatch[3], 10); // field 3 size (generation/index)
+
+    // Extract /Index (optional, default [0 size])
+    let indexStart = 0;
+    let indexCount = size;
+    const indexMatch = body.match(/\/Index\s*\[\s*(\d+)\s+(\d+)\s*\]/);
+    if (indexMatch) {
+      indexStart = parseInt(indexMatch[1], 10);
+      indexCount = parseInt(indexMatch[2], 10);
+    }
+
+    // Extract stream data
+    const streamInfo = this.extractRawStream(offset);
+    if (!streamInfo) {
+      throw new Error('XREFストリームデータの抽出に失敗');
+    }
+
+    // Decompress if needed
+    let streamData;
+    if (streamInfo.filter && streamInfo.filter.includes('FlateDecode')) {
+      streamData = zlibInflate(Uint8Array.from(streamInfo.data, c => c.charCodeAt(0)));
+    } else {
+      streamData = Uint8Array.from(streamInfo.data, c => c.charCodeAt(0));
+    }
+
+    // Parse XREF entries from binary data
+    const offsets = new Map();
+    const entrySize = w1 + w2 + w3;
+    
+    for (let i = 0; i < indexCount; i++) {
+      const entryOffset = i * entrySize;
+      if (entryOffset + entrySize > streamData.length) break;
+
+      let field1 = 0, field2 = 0, field3 = 0;
+      let pos = entryOffset;
+
+      // Read field 1 (type)
+      for (let j = 0; j < w1; j++) {
+        field1 = (field1 << 8) | streamData[pos++];
+      }
+      // Read field 2 (offset or obj number)
+      for (let j = 0; j < w2; j++) {
+        field2 = (field2 << 8) | streamData[pos++];
+      }
+      // Read field 3 (generation or index)
+      for (let j = 0; j < w3; j++) {
+        field3 = (field3 << 8) | streamData[pos++];
+      }
+
+      const objNum = indexStart + i;
+
+      // field1: 0=free, 1=in-use, 2=compressed object stream
+      if (field1 === 1) {
+        // In-use object: field2=offset, field3=generation
+        offsets.set(objNum, field2);
+      } else {
+        // Free or compressed
+        offsets.set(objNum, null);
+      }
+    }
+
+    // Build trailer from the XREF stream dictionary
+    const trailer = {
+      size: size,
+      root: null,
+      info: null
+    };
+
+    const rootMatch = body.match(/\/Root\s+(\d+)\s+(\d+)\s+R/);
+    if (rootMatch) {
+      trailer.root = { num: parseInt(rootMatch[1], 10), gen: parseInt(rootMatch[2], 10) };
+    }
+
+    const infoMatch = body.match(/\/Info\s+(\d+)\s+(\d+)\s+R/);
+    if (infoMatch) {
+      trailer.info = { num: parseInt(infoMatch[1], 10), gen: parseInt(infoMatch[2], 10) };
+    }
+
+    return {
+      offsets,
+      trailer,
+      trailerStr: body
+    };
+  }
+
+  /**
+   * Extract raw stream data without decompression
+   */
+  extractRawStream(offset) {
+    const s = this.getString();
+    const objMarker = s.indexOf(' obj', offset);
+    if (objMarker === -1) return null;
+
+    let pos = objMarker + 4;
+    while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
+
+    // Find dict end
+    const dictEnd = this.findMatchingDelimiter(s, pos, '<<', '>>');
+    const dictStr = s.slice(pos, dictEnd);
+
+    // Get filter
+    const filterMatch = dictStr.match(/\/Filter\s*(\/[A-Za-z0-9]+|\[.*?\])/);
+    const filter = filterMatch ? filterMatch[1] : null;
+
+    // Find stream
+    let streamPos = s.indexOf('stream', dictEnd);
+    if (streamPos === -1) return null;
+    streamPos += 6;
+    if (s[streamPos] === '\r') streamPos++;
+    if (s[streamPos] === '\n') streamPos++;
+
+    const endStream = s.indexOf('endstream', streamPos);
+    if (endStream === -1) return null;
+
+    return {
+      dictStr,
+      data: s.slice(streamPos, endStream),
+      filter
     };
   }
 
@@ -1340,6 +1501,7 @@ async function mergePDFs(fileItems) {
   log('PDF結合を開始します', 'log-info');
   
   const allExtractedPages = [];
+  let outputVersion = '1.4'; // Default, will be updated to max version found
   
   // Phase 4.1: Parse and extract pages from all input PDFs
   for (let i = 0; i < fileItems.length; i++) {
@@ -1354,13 +1516,28 @@ async function mergePDFs(fileItems) {
       const pdfData = parser.parse();
       const rawPdf = parser.getString();
       
+      // Track highest PDF version for output
+      if (pdfData.version) {
+        const verNum = parseFloat(pdfData.version);
+        const outNum = parseFloat(outputVersion);
+        if (verNum > outNum) outputVersion = pdfData.version;
+      }
+      
+      log(`  PDFバージョン: ${pdfData.version || '不明'}`, 'log-info');
+      log(`  オブジェクト数: ${pdfData.objCount || 0}`, 'log-info');
+      
       // Extract pages using Phase 3 functions
       const pages = extractPages(parser, rawPdf);
       log(`  → ${pages.length} ページを抽出`, 'log-ok');
       
-      // Collect content for each page
-      for (const page of pages) {
+      // Debug: show page content info
+      for (let pi = 0; pi < pages.length; pi++) {
+        const page = pages[pi];
         const contentStreams = collectPageContent(page, parser, rawPdf);
+        log(`    [ページ ${pi + 1}] コンテンツストリーム: ${contentStreams.length}個`, 'log-info');
+        for (let ci = 0; ci < contentStreams.length; ci++) {
+          log(`      ストリーム ${ci + 1}: ${contentStreams[ci].length} バイト`, 'log-info');
+        }
         allExtractedPages.push({
           page,
           contentStreams,
@@ -1378,7 +1555,8 @@ async function mergePDFs(fileItems) {
   log(`${allExtractedPages.length} ページから新しいPDFを構築します...`, 'log-info');
   
   // Phase 4.2: Build merged PDF
-  const mergedPdf = buildMergedPDF(allExtractedPages);
+  log(`出力PDFバージョン: ${outputVersion}`, 'log-info');
+  const mergedPdf = buildMergedPDF(allExtractedPages, outputVersion);
   
   setProgress(100, '完成！');
   log('PDF結合が完了しました', 'log-ok');
@@ -1394,7 +1572,7 @@ async function mergePDFs(fileItems) {
  *   3+ = Content streams (if any)
  *   N+ = Page objects
  */
-function buildMergedPDF(extractedPages) {
+function buildMergedPDF(extractedPages, version = '1.4') {
   const encoder = new TextEncoder();
   const parts = [];
   let currentOffset = 0;
@@ -1405,8 +1583,8 @@ function buildMergedPDF(extractedPages) {
     currentOffset += bytes.length;
   }
   
-  // 4.2.1: PDF Header
-  write('%PDF-1.4\n');
+  // 4.2.1: PDF Header (use input PDF version, default to 1.4)
+  write(`%PDF-${version}\n`);
   write('%\xE2\xE3\xCF\xD3\n'); // Binary marker
   
   // 4.2.2: Object numbering setup
@@ -1415,7 +1593,9 @@ function buildMergedPDF(extractedPages) {
   const objects = []; // { num, content }
   
   // Process each page
+  let pageIndex = 0;
   for (const { page, contentStreams, mediaBox } of extractedPages) {
+    pageIndex++;
     let contentRef = null;
     
     // Create content stream object if content exists
@@ -1423,10 +1603,14 @@ function buildMergedPDF(extractedPages) {
       const combinedContent = contentStreams.join('\n');
       contentRef = nextObjectNumber++;
       
+      log(`  ページ ${pageIndex}: コンテンツ ${combinedContent.length} バイト (obj ${contentRef})`, 'log-info');
+      
       objects.push({
         num: contentRef,
         content: `<< /Length ${combinedContent.length} >>\nstream\n${combinedContent}\nendstream`
       });
+    } else {
+      log(`  ページ ${pageIndex}: コンテンツなし`, 'log-warn');
     }
     
     // Create page object
@@ -1512,6 +1696,8 @@ function buildMergedPDF(extractedPages) {
   
   // 4.2.8: Combine all parts into final Uint8Array
   const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
+  log(`  合計サイズ: ${totalLength} バイト`, 'log-info');
+  
   const result = new Uint8Array(totalLength);
   
   let position = 0;
