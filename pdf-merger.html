@@ -3,6 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- 
+  CSP: 외부 데이터 유출 방지
+  - default-src 'self': 모든 리소스를 자기 자신에서만 로드
+  - script-src 'unsafe-inline': 인라인 스크립트 허용 (단일 파일이므로)
+  - style-src 'unsafe-inline': 인라인 스타일 허용
+  - connect-src 'none': 외부 네트워크 요청 차단
+  - img-src data: blob: base64 이미지 허용
+  - font-src 'none': 외부 폰트 차단 (시스템 폰트만 사용)
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'self' data: blob:; font-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none';">
 <title>PDF Merger</title>
 <style>
   :root {
@@ -351,7 +361,75 @@
 // ============================================================
 //  PURE JS PDF MERGER — NO EXTERNAL LIBRARIES
 //  Full scratch implementation for PDF merging
+//  Network Isolation: No external data transmission
 // ============================================================
+
+// ---- 네트워크 격리 검증 (Network Isolation Verification) ----
+// 외부 데이터 유출 방지를 위한 fetch/XHR 차단
+(function setupNetworkIsolation() {
+  'use strict';
+  
+  const BLOCKED_URLS = [
+    'http://', 'https://', 
+    '//', 
+    'data:text/html', 'javascript:'
+  ];
+  
+  function isExternalUrl(url) {
+    if (typeof url !== 'string') return false;
+    // 상대 경로는 허용 (같은 파일 내에서만 동작)
+    if (url.startsWith('#') || url.startsWith('blob:') || url.startsWith('data:')) return false;
+    // 외부 URL 차단
+    return BLOCKED_URLS.some(blocked => url.includes(blocked));
+  }
+  
+  // fetch 차단
+  const originalFetch = window.fetch;
+  window.fetch = function(...args) {
+    const url = args[0];
+    if (isExternalUrl(url)) {
+      console.error('[보안] 외부 fetch 차단됨:', url);
+      return Promise.reject(new Error('외부 네트워크 요청이 차단되었습니다: ' + url));
+    }
+    return originalFetch.apply(this, args);
+  };
+  
+  // XMLHttpRequest 차단
+  const OriginalXHR = window.XMLHttpRequest;
+  window.XMLHttpRequest = function() {
+    const xhr = new OriginalXHR();
+    const originalOpen = xhr.open;
+    xhr.open = function(method, url, ...rest) {
+      if (isExternalUrl(url)) {
+        console.error('[보안] 외부 XHR 차단됨:', url);
+        throw new Error('외부 네트워크 요청이 차단되었습니다: ' + url);
+      }
+      return originalOpen.call(this, method, url, ...rest);
+    };
+    return xhr;
+  };
+  
+  // WebSocket 차단 (외부 연결 완전 차단)
+  const OriginalWebSocket = window.WebSocket;
+  window.WebSocket = function(url, protocols) {
+    console.error('[보안] WebSocket 차단됨:', url);
+    throw new Error('WebSocket 연결이 차단되었습니다.');
+  };
+  
+  // navigator.sendBeacon 차단
+  if (navigator.sendBeacon) {
+    const originalSendBeacon = navigator.sendBeacon;
+    navigator.sendBeacon = function(url, data) {
+      if (isExternalUrl(url)) {
+        console.error('[보안] sendBeacon 차단됨:', url);
+        return false;
+      }
+      return originalSendBeacon.apply(this, arguments);
+    };
+  }
+  
+  console.log('[보안] 네트워크 격리 활성화됨 - 외부 데이터 유출 방지');
+})();
 
 // ---- UI Elements ----
 const fileInput = document.getElementById('fileInput');
