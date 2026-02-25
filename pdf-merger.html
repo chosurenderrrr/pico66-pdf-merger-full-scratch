@@ -1072,7 +1072,7 @@ class PDFParser {
 // ============================================================
 
 /**
- * Build Huffman table from length list
+ * Build Huffman table from length list (zlib.js에서 정확히 복사)
  * @param {Uint8Array|Array} lengths - length list
  * @returns {Array} [table, maxCodeLength, minCodeLength]
  */
@@ -1080,8 +1080,16 @@ function buildHuffmanTable(lengths) {
   const listSize = lengths.length;
   let maxCodeLength = 0;
   let minCodeLength = Number.POSITIVE_INFINITY;
+  let bitLength;
+  let code;
+  let skip;
+  let reversed;
+  let rtemp;
+  let i;
+  let j;
+  let value;
   
-  for (let i = 0; i < listSize; i++) {
+  for (i = 0; i < listSize; i++) {
     if (lengths[i] > maxCodeLength) maxCodeLength = lengths[i];
     if (lengths[i] < minCodeLength) minCodeLength = lengths[i];
   }
@@ -1089,20 +1097,18 @@ function buildHuffmanTable(lengths) {
   const size = 1 << maxCodeLength;
   const table = new Uint32Array(size);
   
-  for (let bitLength = 1, code = 0, skip = 2; bitLength <= maxCodeLength;) {
-    for (let i = 0; i < listSize; i++) {
+  for (bitLength = 1, code = 0, skip = 2; bitLength <= maxCodeLength;) {
+    for (i = 0; i < listSize; i++) {
       if (lengths[i] === bitLength) {
         // Reverse bit order
-        let reversed = 0;
-        let rtemp = code;
-        for (let j = 0; j < bitLength; j++) {
+        for (reversed = 0, rtemp = code, j = 0; j < bitLength; j++) {
           reversed = (reversed << 1) | (rtemp & 1);
           rtemp >>= 1;
         }
         
         // Value: (bitLength << 16) | symbol
-        const value = (bitLength << 16) | i;
-        for (let j = reversed; j < size; j += skip) {
+        value = (bitLength << 16) | i;
+        for (j = reversed; j < size; j += skip) {
           table[j] = value;
         }
         code++;
