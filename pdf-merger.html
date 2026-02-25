@@ -1325,40 +1325,54 @@ class RawInflate {
     let output = this.output;
     let op = this.op;
     let olength = output.length;
+    let iterations = 0;
+    
+    log(`[DEBUG] decodeHuffmanAdaptive 시작, 출력 위치: ${op}`, 'log-info');
     
     while (true) {
+      iterations++;
+      if (iterations % 1000 === 0) {
+        log(`[DEBUG] 디코딩 중... ${iterations}번째 반복, 출력: ${op}바이트`, 'log-info');
+      }
+      
       const code = this.readCodeByTable(litlen);
       
-      if (code === 256) break;
+      if (code === 256) {
+        log(`[DEBUG] 블록 종료 코드(256) 수신, 총 ${op}바이트`, 'log-info');
+        break;
+      }
       
       if (code < 256) {
+        // Literal
         if (op >= olength) {
           output = this.expandBuffer();
           olength = output.length;
         }
         output[op++] = code;
-        continue;
-      }
-      
-      const ti = code - 257;
-      let codeLength = RawInflate.LengthCodeTable[ti];
-      if (RawInflate.LengthExtraTable[ti] > 0) {
-        codeLength += this.readBits(RawInflate.LengthExtraTable[ti]);
-      }
-      
-      const codeDistCode = this.readCodeByTable(dist);
-      let codeDist = RawInflate.DistCodeTable[codeDistCode];
-      if (RawInflate.DistExtraTable[codeDistCode] > 0) {
-        codeDist += this.readBits(RawInflate.DistExtraTable[codeDistCode]);
-      }
-      
-      if (op + codeLength > olength) {
-        output = this.expandBuffer();
-        olength = output.length;
-      }
-      while (codeLength--) {
-        output[op] = output[op - codeDist];
-        op++;
+      } else {
+        // Length/distance
+        const ti = code - 257;
+        let codeLength = RawInflate.LengthCodeTable[ti];
+        if (RawInflate.LengthExtraTable[ti] > 0) {
+          codeLength += this.readBits(RawInflate.LengthExtraTable[ti]);
+        }
+        
+        const codeDistCode = this.readCodeByTable(dist);
+        let codeDist = RawInflate.DistCodeTable[codeDistCode];
+        if (RawInflate.DistExtraTable[codeDistCode] > 0) {
+          codeDist += this.readBits(RawInflate.DistExtraTable[codeDistCode]);
+        }
+        
+        if (op + codeLength > olength) {
+          output = this.expandBuffer();
+          olength = output.length;
+        }
+        
+        // LZ77 복사
+        const copyStart = op - codeDist;
+        for (let i = 0; i < codeLength; i++) {
+          output[op++] = output[copyStart + i];
+        }
       }
     }
     
@@ -1367,18 +1381,21 @@ class RawInflate {
       this.ip--;
     }
     this.op = op;
+    log(`[DEBUG] decodeHuffmanAdaptive 종료, 총 ${op}바이트`, 'log-info');
   }
   
   expandBuffer(optParam = {}) {
-    // 고정 2배 확장 (복잡한 계산은 버그의 원인)
+    // 고정 2배 확장
     const ratio = optParam.fixRatio || 2;
     const newSize = Math.floor(this.output.length * ratio);
     
-    // 최대 버퍼 크기 제한 (1MB로 더 낮게 설정)
-    const MAX_BUFFER_SIZE = 1 * 1024 * 1024;
+    // 최대 버퍼 크기 제한 (16MB)
+    const MAX_BUFFER_SIZE = 16 * 1024 * 1024;
     if (newSize > MAX_BUFFER_SIZE) {
-      throw new Error(`버퍼 크기가 너무 큽니다: ${newSize}`);
+      throw new Error(`버퍼 크기가 너무 큽니다: ${newSize} (현재 ${this.output.length})`);
     }
+    
+    log(`[DEBUG] 버퍼 확장: ${this.output.length} -> ${newSize}`, 'log-info');
     
     const buffer = new Uint8Array(newSize);
     buffer.set(this.output);
