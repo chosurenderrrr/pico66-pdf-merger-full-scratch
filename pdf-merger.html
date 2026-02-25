@@ -365,7 +365,7 @@
 // ============================================================
 
 // ---- 네트워크 격리 검증 (Network Isolation Verification) ----
-// 외부 데이터 유출 방지를 위한 fetch/XHR 차단
+// fetch/XHRを遮断して外部へのデータ漏洩を防止
 (function setupNetworkIsolation() {
   'use strict';
   
@@ -377,13 +377,13 @@
   
   function isExternalUrl(url) {
     if (typeof url !== 'string') return false;
-    // 상대 경로는 허용 (같은 파일 내에서만 동작)
+    // 相対パスは許可（同一ファイル内でのみ動作）
     if (url.startsWith('#') || url.startsWith('blob:') || url.startsWith('data:')) return false;
-    // 외부 URL 차단
+    // 外部URLを遮断
     return BLOCKED_URLS.some(blocked => url.includes(blocked));
   }
   
-  // fetch 차단
+  // fetchを遮断
   const originalFetch = window.fetch;
   window.fetch = function(...args) {
     const url = args[0];
@@ -394,7 +394,7 @@
     return originalFetch.apply(this, args);
   };
   
-  // XMLHttpRequest 차단
+  // XMLHttpRequestを遮断
   const OriginalXHR = window.XMLHttpRequest;
   window.XMLHttpRequest = function() {
     const xhr = new OriginalXHR();
@@ -409,14 +409,14 @@
     return xhr;
   };
   
-  // WebSocket 차단 (외부 연결 완전 차단)
+  // WebSocketを遮断（外部接続を完全に遮断）
   const OriginalWebSocket = window.WebSocket;
   window.WebSocket = function(url, protocols) {
     console.error('[보안] WebSocket 차단됨:', url);
     throw new Error('WebSocket 연결이 차단되었습니다.');
   };
   
-  // navigator.sendBeacon 차단
+  // navigator.sendBeaconを遮断
   if (navigator.sendBeacon) {
     const originalSendBeacon = navigator.sendBeacon;
     navigator.sendBeacon = function(url, data) {
@@ -428,7 +428,7 @@
     };
   }
   
-  console.log('[보안] 네트워크 격리 활성화됨 - 외부 데이터 유출 방지');
+  console.log('[Security] ネットワーク分離を有効化 - 外部へのデータ漏洩を防止');
 })();
 
 // ---- UI Elements ----
@@ -554,7 +554,7 @@ function log(msg, cls = '') {
   logEl.appendChild(line);
   logEl.scrollTop = logEl.scrollHeight;
   
-  // 콘솔에도 출력 (디버깅용)
+  // コンソールにも出力（デバッグ用）
   const consoleMsg = cls === 'log-err' ? '[ERROR] ' + msg : 
                      cls === 'log-info' ? '[INFO] ' + msg :
                      cls === 'log-ok' ? '[OK] ' + msg : msg;
@@ -1125,7 +1125,7 @@ class RawInflate {
     this.ip = optParams.index || 0;
     this.bitsbuf = 0;
     this.bitsbuflen = 0;
-    // 초기 버퍼 크기: 고정 32KB (너무 크면 메모리 문제 발생)
+    // 初期バッファサイズ: 固定32KB（大きすぎるとメモリ問題が発生）
     this.output = new Uint8Array(optParams.bufferSize || 0x8000);
     this.op = 0;
     this.bfinal = false;
@@ -1357,7 +1357,7 @@ class RawInflate {
           olength = output.length;
         }
         
-        // LZ77 복사
+        // LZ77コピー
         const copyStart = op - codeDist;
         for (let i = 0; i < codeLength; i++) {
           output[op++] = output[copyStart + i];
@@ -1373,11 +1373,11 @@ class RawInflate {
   }
   
   expandBuffer(optParam = {}) {
-    // 고정 2배 확장
+    // 固定2倍拡張
     const ratio = optParam.fixRatio || 2;
     const newSize = Math.floor(this.output.length * ratio);
     
-    // 최대 버퍼 크기 제한 (16MB)
+    // 最大バッファサイズ制限（16MB）
     const MAX_BUFFER_SIZE = 16 * 1024 * 1024;
     if (newSize > MAX_BUFFER_SIZE) {
       throw new Error(`버퍼 크기가 너무 큽니다: ${newSize} (현재 ${this.output.length})`);
@@ -1576,7 +1576,7 @@ function extractStreamData(pdfString, offset, parser) {
 
   return {
     dictStr,
-    streamData,  // 원본 문자열 (압축된 상태, Latin-1)
+    streamData,  // 元の文字列（圧縮状態、Latin-1）
     filter: filterVal,
     length: streamData.length
   };
@@ -1587,7 +1587,7 @@ function extractStreamData(pdfString, offset, parser) {
  */
 function getStreamBytes(streamInfo) {
   if (!streamInfo) return null;
-  // Latin-1 인코딩으로 바이트 배열 변환
+  // Latin-1エンコーディングでバイト配列に変換
   return Uint8Array.from(streamInfo.streamData, c => c.charCodeAt(0) & 0xFF);
 }
 
