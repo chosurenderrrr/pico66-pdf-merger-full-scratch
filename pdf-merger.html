@@ -1271,7 +1271,7 @@ function zlibInflate(data) {
 }
 
 // ============================================================
-//  Page Extraction
+//  Page Extraction (압축 해제 없이 원본 데이터 추출)
 // ============================================================
 
 /**
@@ -1322,7 +1322,8 @@ function parseObjectRef(str) {
 }
 
 /**
- * Extract raw stream data from object
+ * Extract raw stream data from object (압축 해제 없이 원본 반환)
+ * Returns: { dictStr, streamData: string, filter, length }
  */
 function extractStreamData(pdfString, offset, parser) {
   const objMarker = pdfString.indexOf(' obj', offset);
@@ -1354,35 +1355,19 @@ function extractStreamData(pdfString, offset, parser) {
 
   return {
     dictStr,
-    streamData,
-    filter: filterVal
+    streamData,  // 원본 문자열 (압축된 상태)
+    filter: filterVal,
+    length: streamData.length
   };
 }
 
 /**
- * Decompress stream if needed
+ * Get stream as Uint8Array (for binary copy)
  */
-function decompressStream(streamInfo) {
-  const { streamData, filter } = streamInfo;
-
-  if (!filter || !filter.includes('FlateDecode')) {
-    return streamData;
-  }
-
-  const bytes = Uint8Array.from(streamData, c => c.charCodeAt(0));
-  try {
-    const decompressed = zlibInflate(bytes);
-    // Convert back to string
-    let result = '';
-    const CHUNK = 8192;
-    for (let i = 0; i < decompressed.length; i += CHUNK) {
-      result += String.fromCharCode(...decompressed.subarray(i, i + CHUNK));
-    }
-    return result;
-  } catch (e) {
-    console.warn('ストリーム解凍に失敗、生データを使用:', e.message);
-    return streamData;
-  }
+function getStreamBytes(streamInfo) {
+  if (!streamInfo) return null;
+  // Latin-1 인코딩으로 바이트 배열 변환
+  return Uint8Array.from(streamInfo.streamData, c => c.charCodeAt(0) & 0xFF);
 }
 
 /**
@@ -1453,7 +1438,8 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
 }
 
 /**
- * Collect all content streams for a page
+ * Collect all content streams for a page (압축 해제 없이 원본 데이터 수집)
+ * Returns array of { bytes: Uint8Array, filter: string, length: number }
  */
 function collectPageContent(page, parser, rawPdf) {
   const contents = [];
@@ -1468,7 +1454,14 @@ function collectPageContent(page, parser, rawPdf) {
       if (refObj) {
         const streamInfo = extractStreamData(rawPdf, parser.offsets.get(refObj.num), parser);
         if (streamInfo) {
-          contents.push(decompressStream(streamInfo));
+          const bytes = getStreamBytes(streamInfo);
+          if (bytes) {
+            contents.push({
+              bytes,
+              filter: streamInfo.filter,
+              length: bytes.length
+            });
+          }
         }
       }
     }
@@ -1480,7 +1473,14 @@ function collectPageContent(page, parser, rawPdf) {
       if (offset !== undefined && offset !== null) {
         const streamInfo = extractStreamData(rawPdf, offset, parser);
         if (streamInfo) {
-          contents.push(decompressStream(streamInfo));
+          const bytes = getStreamBytes(streamInfo);
+          if (bytes) {
+            contents.push({
+              bytes,
+              filter: streamInfo.filter,
+              length: bytes.length
+            });
+          }
         }
       }
     }
@@ -1590,7 +1590,7 @@ function buildMergedPDF(extractedPages, version = '1.4') {
   // 4.2.2: Object numbering setup
   let nextObjectNumber = 3;
   const pageObjectNumbers = [];
-  const objects = []; // { num, content }
+  const objects = []; // { num, content: string, streamBytes?: Uint8Array }
   
   // Process each page
   let pageIndex = 0;
@@ -1598,16 +1598,33 @@ function buildMergedPDF(extractedPages, version = '1.4') {
     pageIndex++;
     let contentRef = null;
     
-    // Create content stream object if content exists
+    // Create content stream object if content exists (압축 데이터 그대로 복사)
     if (contentStreams.length > 0) {
-      const combinedContent = contentStreams.join('\n');
       contentRef = nextObjectNumber++;
       
-      log(`  ページ ${pageIndex}: コンテンツ ${combinedContent.length} バイト (obj ${contentRef})`, 'log-info');
+      // 여러 스트림을 하나로 연결
+      let totalLength = 0;
+      for (const cs of contentStreams) totalLength += cs.length;
+      
+      const combinedBytes = new Uint8Array(totalLength);
+      let pos = 0;
+      for (const cs of contentStreams) {
+        combinedBytes.set(cs.bytes, pos);
+        pos += cs.bytes.length;
+      }
+      
+      log(`  ページ ${pageIndex}: コンテンツ ${totalLength} バイト (obj ${contentRef})`, 'log-info');
+      
+      // Filter 유지 (FlateDecode 등)
+      const hasFilter = contentStreams[0].filter;
+      let dict = `<< /Length ${combinedBytes.length}`;
+      if (hasFilter) dict += ` /Filter ${hasFilter}`;
+      dict += ` >>`;
       
       objects.push({
         num: contentRef,
-        content: `<< /Length ${combinedContent.length} >>\nstream\n${combinedContent}\nendstream`
+        dict: dict,
+        streamBytes: combinedBytes  // 바이너리 데이터 별도 저장
       });
     } else {
       log(`  ページ ${pageIndex}: コンテンツなし`, 'log-warn');
@@ -1667,7 +1684,19 @@ function buildMergedPDF(extractedPages, version = '1.4') {
   
   for (const obj of objects) {
     xrefOffsets.set(obj.num, currentOffset);
-    write(`${obj.num} 0 obj\n${obj.content}\nendobj\n`);
+    
+    if (obj.streamBytes) {
+      // 스트림 객체 (바이너리 데이터)
+      write(`${obj.num} 0 obj\n`);
+      write(`${obj.dict}\n`);
+      write('stream\n');
+      write(obj.streamBytes);
+      write('\nendstream\n');
+      write('endobj\n');
+    } else {
+      // 일반 객체
+      write(`${obj.num} 0 obj\n${obj.content}\nendobj\n`);
+    }
   }
   
   // 4.2.6: Build XREF table
