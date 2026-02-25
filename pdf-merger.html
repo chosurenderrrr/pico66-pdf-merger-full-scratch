@@ -1072,7 +1072,7 @@ class PDFParser {
 // ============================================================
 
 /**
- * Build Huffman table from length list (zlib.js에서 정확히 복사)
+ * Build Huffman table from length list
  * @param {Uint8Array|Array} lengths - length list
  * @returns {Array} [table, maxCodeLength, minCodeLength]
  */
@@ -1080,16 +1080,8 @@ function buildHuffmanTable(lengths) {
   const listSize = lengths.length;
   let maxCodeLength = 0;
   let minCodeLength = Number.POSITIVE_INFINITY;
-  let bitLength;
-  let code;
-  let skip;
-  let reversed;
-  let rtemp;
-  let i;
-  let j;
-  let value;
   
-  for (i = 0; i < listSize; i++) {
+  for (let i = 0; i < listSize; i++) {
     if (lengths[i] > maxCodeLength) maxCodeLength = lengths[i];
     if (lengths[i] < minCodeLength) minCodeLength = lengths[i];
   }
@@ -1097,18 +1089,20 @@ function buildHuffmanTable(lengths) {
   const size = 1 << maxCodeLength;
   const table = new Uint32Array(size);
   
-  for (bitLength = 1, code = 0, skip = 2; bitLength <= maxCodeLength;) {
-    for (i = 0; i < listSize; i++) {
+  for (let bitLength = 1, code = 0, skip = 2; bitLength <= maxCodeLength;) {
+    for (let i = 0; i < listSize; i++) {
       if (lengths[i] === bitLength) {
         // Reverse bit order
-        for (reversed = 0, rtemp = code, j = 0; j < bitLength; j++) {
+        let reversed = 0;
+        let rtemp = code;
+        for (let j = 0; j < bitLength; j++) {
           reversed = (reversed << 1) | (rtemp & 1);
           rtemp >>= 1;
         }
         
         // Value: (bitLength << 16) | symbol
-        value = (bitLength << 16) | i;
-        for (j = reversed; j < size; j += skip) {
+        const value = (bitLength << 16) | i;
+        for (let j = reversed; j < size; j += skip) {
           table[j] = value;
         }
         code++;
@@ -1524,6 +1518,7 @@ function parseObjectRef(str) {
 /**
  * Extract raw stream data from object (압축 해제 없이 원본 반환)
  * Returns: { dictStr, streamData: string, filter, length }
+ * Uses /Length for precise binary extraction when available
  */
 function extractStreamData(pdfString, offset, parser) {
   const objMarker = pdfString.indexOf(' obj', offset);
@@ -1548,14 +1543,40 @@ function extractStreamData(pdfString, offset, parser) {
   if (pdfString[streamPos] === '\r') streamPos++;
   if (pdfString[streamPos] === '\n') streamPos++;
 
-  let endPos = pdfString.indexOf('endstream', streamPos);
-  if (endPos === -1) return null;
+  let endPos;
+
+  // Try to use /Length for precise extraction (handles binary data safely)
+  let resolvedLength = null;
+  if (lengthVal) {
+    const ref = parseObjectRef(lengthVal);
+    if (ref) {
+      // Indirect reference — resolve it
+      const lenObj = parser.getObject(ref.num);
+      if (lenObj) {
+        const parsed = parseInt(lenObj.body.trim(), 10);
+        if (!isNaN(parsed)) resolvedLength = parsed;
+      }
+    } else {
+      const parsed = parseInt(lengthVal, 10);
+      if (!isNaN(parsed)) resolvedLength = parsed;
+    }
+  }
+
+  if (resolvedLength !== null && resolvedLength > 0) {
+    endPos = streamPos + resolvedLength;
+  } else {
+    // Fallback: search for endstream
+    endPos = pdfString.indexOf('endstream', streamPos);
+    if (endPos === -1) return null;
+    // Trim trailing whitespace before endstream
+    while (endPos > streamPos && ' \t\r\n'.includes(pdfString[endPos - 1])) endPos--;
+  }
 
   const streamData = pdfString.slice(streamPos, endPos);
 
   return {
     dictStr,
-    streamData,  // 원본 문자열 (압축된 상태)
+    streamData,  // 원본 문자열 (압축된 상태, Latin-1)
     filter: filterVal,
     length: streamData.length
   };
@@ -1568,6 +1589,43 @@ function getStreamBytes(streamInfo) {
   if (!streamInfo) return null;
   // Latin-1 인코딩으로 바이트 배열 변환
   return Uint8Array.from(streamInfo.streamData, c => c.charCodeAt(0) & 0xFF);
+}
+
+/**
+ * Resolve indirect /Resources reference to inline dictionary
+ * If resources is "N G R", look up the object and return its body
+ * Also checks parent Pages node for inherited resources
+ */
+function resolveResources(resources, parser, pageParentNum) {
+  // Case 1: already inline dict
+  if (resources && resources.startsWith('<<')) {
+    return resources;
+  }
+  
+  // Case 2: indirect reference
+  if (resources) {
+    const ref = parseObjectRef(resources);
+    if (ref) {
+      const obj = parser.getObject(ref.num);
+      if (obj && obj.body) {
+        const body = obj.body.trim();
+        if (body.startsWith('<<')) return body;
+      }
+    }
+  }
+  
+  // Case 3: no resources on page — try to inherit from parent Pages node
+  if (pageParentNum !== undefined && pageParentNum !== null) {
+    const parentNode = parser.getObject(pageParentNum);
+    if (parentNode) {
+      const parentRes = extractDictValue(parentNode.body, 'Resources');
+      if (parentRes) {
+        return resolveResources(parentRes, parser, null);
+      }
+    }
+  }
+  
+  return null;
 }
 
 /**
@@ -1602,7 +1660,7 @@ function extractPages(parser, rawPdf) {
 /**
  * Recursively collect pages from Pages tree
  */
-function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
+function collectPagesFromTree(parser, nodeNum, pages, rawPdf, parentNum) {
   const node = parser.getObject(nodeNum);
   if (!node) return;
 
@@ -1612,7 +1670,10 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
     // Leaf page
     const mediaBox = extractDictValue(node.body, 'MediaBox') || '[0 0 612 792]';
     const contents = extractDictValue(node.body, 'Contents');
-    const resources = extractDictValue(node.body, 'Resources');
+    const rawResources = extractDictValue(node.body, 'Resources');
+    
+    // Resolve resources: inline dict, indirect ref, or inherit from parent
+    const resources = resolveResources(rawResources, parser, parentNum);
 
     pages.push({
       objNum: nodeNum,
@@ -1629,7 +1690,7 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
       for (const ref of refs) {
         const refObj = parseObjectRef(ref);
         if (refObj) {
-          collectPagesFromTree(parser, refObj.num, pages, rawPdf);
+          collectPagesFromTree(parser, refObj.num, pages, rawPdf, nodeNum);
         }
       }
     }
@@ -1637,7 +1698,59 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
 }
 
 /**
- * Collect all content streams for a page (解凍して文字列として返す)
+ * Collect raw (compressed) content stream bytes + dict for a page
+ * Returns array of { bytes: Uint8Array, dictStr: string }
+ * NO decompression — binary passthrough for lossless copy
+ */
+function collectPageContentRaw(page, parser, rawPdf) {
+  const streams = [];
+
+  if (!page.contents) {
+    return streams;
+  }
+
+  const refPattern = /(\d+)\s+(\d+)\s+R/g;
+  const contentsStr = page.contents.trim();
+
+  // Array of content stream refs  e.g. [5 0 R 6 0 R]
+  if (contentsStr.startsWith('[')) {
+    const inner = contentsStr.slice(1, -1);
+    let m;
+    while ((m = refPattern.exec(inner)) !== null) {
+      const objNum = parseInt(m[1], 10);
+      const offset = parser.offsets.get(objNum);
+      if (offset !== undefined && offset !== null) {
+        const info = extractStreamData(rawPdf, offset, parser);
+        if (info) {
+          streams.push({
+            bytes: Uint8Array.from(info.streamData, c => c.charCodeAt(0) & 0xFF),
+            dictStr: info.dictStr
+          });
+        }
+      }
+    }
+  } else {
+    // Single content stream ref  e.g. 5 0 R
+    const ref = parseObjectRef(contentsStr);
+    if (ref) {
+      const offset = parser.offsets.get(ref.num);
+      if (offset !== undefined && offset !== null) {
+        const info = extractStreamData(rawPdf, offset, parser);
+        if (info) {
+          streams.push({
+            bytes: Uint8Array.from(info.streamData, c => c.charCodeAt(0) & 0xFF),
+            dictStr: info.dictStr
+          });
+        }
+      }
+    }
+  }
+
+  return streams;
+}
+
+/**
+ * (Legacy) Collect all content streams for a page (解凍して文字列として返す)
  * Returns array of strings (decompressed PDF commands)
  */
 async function collectPageContent(page, parser, rawPdf) {
@@ -1690,19 +1803,151 @@ async function collectPageContent(page, parser, rawPdf) {
 
 // ============================================================
 //  PHASE 4: PDF Builder - Merged PDF Construction
+//  Binary passthrough with recursive object copy & renumbering
 // ============================================================
 
 /**
+ * Collect all object numbers referenced (directly/indirectly) from a page,
+ * excluding the page object itself. Recursively follows "N G R" references.
+ */
+function collectReferencedObjects(parser, startObjNums, rawPdf) {
+  const visited = new Set();
+  const queue = [...startObjNums];
+  
+  while (queue.length > 0) {
+    const num = queue.pop();
+    if (visited.has(num)) continue;
+    visited.add(num);
+    
+    const obj = parser.getObject(num);
+    if (!obj) continue;
+    
+    // Find all "N G R" references in the object body
+    const refPattern = /(\d+)\s+\d+\s+R/g;
+    let m;
+    while ((m = refPattern.exec(obj.body)) !== null) {
+      const refNum = parseInt(m[1], 10);
+      if (!visited.has(refNum) && parser.offsets.has(refNum)) {
+        queue.push(refNum);
+      }
+    }
+  }
+  
+  return visited;
+}
+
+/**
+ * Extract the raw bytes of a complete object (from "N G obj" to "endobj")
+ * including any binary stream data, directly from the Uint8Array buffer.
+ */
+function extractObjectRawBytes(parser, objNum) {
+  const offset = parser.offsets.get(objNum);
+  if (offset === undefined || offset === null) return null;
+  
+  const buf = parser.buf;
+  const rawPdf = parser.getString();
+  
+  // Find object header: "N G obj"
+  const objMarker = rawPdf.indexOf(' obj', offset);
+  if (objMarker === -1) return null;
+  
+  let bodyStart = objMarker + 4;
+  while (bodyStart < rawPdf.length && ' \t\r\n'.includes(rawPdf[bodyStart])) bodyStart++;
+  
+  // Check if it contains a stream
+  const hasStream = rawPdf.indexOf('stream', bodyStart);
+  const endObj = rawPdf.indexOf('endobj', bodyStart);
+  
+  if (hasStream !== -1 && hasStream < endObj) {
+    // Object with stream — need to use /Length for precise binary extraction
+    // Parse the dictionary to get Length
+    const dictEnd = parser.findMatchingDelimiter(rawPdf, bodyStart, '<<', '>>');
+    const dictStr = rawPdf.slice(bodyStart, dictEnd);
+    
+    // Resolve /Length
+    const lengthVal = extractDictValue(dictStr, 'Length');
+    let streamLength = null;
+    if (lengthVal) {
+      const ref = parseObjectRef(lengthVal);
+      if (ref) {
+        const lenObj = parser.getObject(ref.num);
+        if (lenObj) {
+          const parsed = parseInt(lenObj.body.trim(), 10);
+          if (!isNaN(parsed)) streamLength = parsed;
+        }
+      } else {
+        const parsed = parseInt(lengthVal, 10);
+        if (!isNaN(parsed)) streamLength = parsed;
+      }
+    }
+    
+    // Find "stream\n" or "stream\r\n"
+    let streamDataStart = rawPdf.indexOf('stream', dictEnd) + 6;
+    if (rawPdf[streamDataStart] === '\r') streamDataStart++;
+    if (rawPdf[streamDataStart] === '\n') streamDataStart++;
+    
+    let streamDataEnd;
+    if (streamLength !== null && streamLength > 0) {
+      streamDataEnd = streamDataStart + streamLength;
+    } else {
+      streamDataEnd = rawPdf.indexOf('endstream', streamDataStart);
+      if (streamDataEnd === -1) return null;
+    }
+    
+    // Extract bytes: stream binary data
+    const streamBytes = buf.slice(streamDataStart, streamDataEnd);
+    
+    // Return structured data for rebuilding
+    return {
+      type: 'stream',
+      dictStr,
+      streamBytes,
+      streamLength: streamBytes.length
+    };
+  } else {
+    // Regular object (no stream)
+    if (endObj === -1) return null;
+    const body = rawPdf.slice(bodyStart, endObj).trim();
+    return {
+      type: 'regular',
+      body
+    };
+  }
+}
+
+/**
+ * Rewrite all "N G R" references in a string according to a renumber map
+ */
+function renumberRefs(str, renumberMap) {
+  return str.replace(/(\d+)\s+(\d+)\s+R/g, (match, num, gen) => {
+    const oldNum = parseInt(num, 10);
+    const newNum = renumberMap.get(oldNum);
+    if (newNum !== undefined) {
+      return `${newNum} 0 R`;
+    }
+    return match; // keep as-is if not in map (shouldn't happen)
+  });
+}
+
+/**
  * Merge multiple PDFs into a single PDF
- * Process: Parse → Extract Pages → Build new PDF with renumbered objects
+ * Process: Parse → Extract Pages + all referenced objects → 
+ *          Renumber → Build new PDF with binary passthrough
  */
 async function mergePDFs(fileItems) {
   log('PDF結合を開始します', 'log-info');
   
-  const allExtractedPages = [];
-  let outputVersion = '1.4'; // Default, will be updated to max version found
+  let outputVersion = '1.4';
   
-  // Phase 4.1: Parse and extract pages from all input PDFs
+  // Collected data from all source PDFs
+  // Each entry: { pageObjData, referencedObjs: Map<oldNum, rawData>, renumberMap }
+  const allPages = [];
+  
+  // Global object counter for the merged PDF
+  // 1 = Catalog, 2 = Pages tree
+  let nextObjNum = 3;
+  
+  // Phase 1: Parse all PDFs and collect pages + referenced objects
   for (let i = 0; i < fileItems.length; i++) {
     const item = fileItems[i];
     const progress = Math.round((i / fileItems.length) * 40);
@@ -1715,40 +1960,70 @@ async function mergePDFs(fileItems) {
       const pdfData = parser.parse();
       const rawPdf = parser.getString();
       
-      // Track highest PDF version for output
       if (pdfData.version) {
         const verNum = parseFloat(pdfData.version);
-        const outNum = parseFloat(outputVersion);
-        if (verNum > outNum) outputVersion = pdfData.version;
+        if (verNum > parseFloat(outputVersion)) outputVersion = pdfData.version;
       }
       
       log(`  PDFバージョン: ${pdfData.version || '不明'}`, 'log-info');
       log(`  オブジェクト数: ${pdfData.objCount || 0}`, 'log-info');
       
-      // Extract pages using Phase 3 functions
       const pages = extractPages(parser, rawPdf);
       log(`  → ${pages.length} ページを抽出`, 'log-ok');
       
-      // Debug: show page content info
       for (let pi = 0; pi < pages.length; pi++) {
         const page = pages[pi];
-        try {
-          const contentStreams = await collectPageContent(page, parser, rawPdf);
-          log(`    [ページ ${pi + 1}] コンテンツストリーム: ${contentStreams.length}個`, 'log-info');
-          let totalSize = 0;
-          for (let ci = 0; ci < contentStreams.length; ci++) {
-            log(`      ストリーム ${ci + 1}: ${contentStreams[ci].length} バイト`, 'log-info');
-            totalSize += contentStreams[ci].length;
+        
+        // Find all objects referenced by this page
+        const contentRefs = [];
+        if (page.contents) {
+          const refPattern = /(\d+)\s+\d+\s+R/g;
+          let m;
+          while ((m = refPattern.exec(page.contents)) !== null) {
+            contentRefs.push(parseInt(m[1], 10));
           }
-          log(`      合計: ${totalSize} バイト`, 'log-info');
-          allExtractedPages.push({
-            page,
-            contentStreams,
-            mediaBox: page.mediaBox
-          });
-        } catch (e) {
-          log(`    [ページ ${pi + 1}] コンテンツ取得失敗: ${e.message}`, 'log-err');
         }
+        
+        const resourceRefs = [];
+        if (page.resources) {
+          const refPattern = /(\d+)\s+\d+\s+R/g;
+          let m;
+          while ((m = refPattern.exec(page.resources)) !== null) {
+            resourceRefs.push(parseInt(m[1], 10));
+          }
+        }
+        
+        // Recursively collect all referenced object numbers
+        const allRefNums = collectReferencedObjects(
+          parser, 
+          [...contentRefs, ...resourceRefs], 
+          rawPdf
+        );
+        
+        log(`    [ページ ${pi + 1}] 参照オブジェクト: ${allRefNums.size}個`, 'log-info');
+        
+        // Build renumber map for this page's objects
+        const renumberMap = new Map();
+        const objDataMap = new Map(); // oldNum → rawData
+        
+        for (const oldNum of allRefNums) {
+          const rawData = extractObjectRawBytes(parser, oldNum);
+          if (rawData) {
+            renumberMap.set(oldNum, nextObjNum);
+            objDataMap.set(oldNum, rawData);
+            nextObjNum++;
+          }
+        }
+        
+        // Also need a page object number in the merged PDF
+        const pageObjNum = nextObjNum++;
+        
+        allPages.push({
+          page,
+          objDataMap,
+          renumberMap,
+          pageObjNum
+        });
       }
       
     } catch (e) {
@@ -1758,11 +2033,11 @@ async function mergePDFs(fileItems) {
   }
   
   setProgress(50, '新しいPDFを構築中...');
-  log(`${allExtractedPages.length} ページから新しいPDFを構築します...`, 'log-info');
-  
-  // Phase 4.2: Build merged PDF
+  log(`${allPages.length} ページから新しいPDFを構築します...`, 'log-info');
   log(`出力PDFバージョン: ${outputVersion}`, 'log-info');
-  const mergedPdf = buildMergedPDF(allExtractedPages, outputVersion);
+  
+  // Phase 2: Build merged PDF
+  const mergedPdf = buildMergedPDF(allPages, outputVersion);
   
   setProgress(100, '完成！');
   log('PDF結合が完了しました', 'log-ok');
@@ -1771,146 +2046,126 @@ async function mergePDFs(fileItems) {
 }
 
 /**
- * Build a new PDF from extracted pages
- * Object numbering scheme:
- *   1 = Catalog
- *   2 = Pages
- *   3+ = Content streams (if any)
- *   N+ = Page objects
+ * Build a new PDF from pages with renumbered objects (binary passthrough)
  */
-function buildMergedPDF(extractedPages, version = '1.4') {
+function buildMergedPDF(allPages, version = '1.4') {
   const encoder = new TextEncoder();
   const parts = [];
   let currentOffset = 0;
   
-  function write(data) {
-    const bytes = typeof data === 'string' ? encoder.encode(data) : data;
+  function writeStr(data) {
+    const bytes = encoder.encode(data);
     parts.push(bytes);
     currentOffset += bytes.length;
   }
   
-  // 4.2.1: PDF Header (use input PDF version, default to 1.4)
-  write(`%PDF-${version}\n`);
-  write('%\xE2\xE3\xCF\xD3\n'); // Binary marker
+  function writeBytes(data) {
+    parts.push(data);
+    currentOffset += data.length;
+  }
   
-  // 4.2.2: Object numbering setup
-  let nextObjectNumber = 3;
+  // PDF Header
+  writeStr(`%PDF-${version}\n`);
+  writeStr('%\xE2\xE3\xCF\xD3\n');
+  
+  const xrefOffsets = new Map();
   const pageObjectNumbers = [];
-  const objects = []; // { num, content: string, streamBytes?: Uint8Array }
   
-  // Process each page
-  let pageIndex = 0;
-  for (const { page, contentStreams, mediaBox } of extractedPages) {
-    pageIndex++;
-    let contentRef = null;
-    
-    // Create content stream object if content exists (解凍済みデータを使用)
-    if (contentStreams.length > 0) {
-      const combinedContent = contentStreams.join('\n');
-      contentRef = nextObjectNumber++;
-      
-      log(`  ページ ${pageIndex}: コンテンツ ${combinedContent.length} バイト (obj ${contentRef})`, 'log-info');
-      
-      // 解凍済みデータは非圧縮で保存
-      objects.push({
-        num: contentRef,
-        content: `<< /Length ${combinedContent.length} >>\nstream\n${combinedContent}\nendstream`
-      });
-    } else {
-      log(`  ページ ${pageIndex}: コンテンツなし`, 'log-warn');
-    }
-    
-    // Create page object
-    const pageObjNum = nextObjectNumber++;
+  // Write all referenced objects from all pages (renumbered)
+  for (const { page, objDataMap, renumberMap, pageObjNum } of allPages) {
     pageObjectNumbers.push(pageObjNum);
     
-    // Build page dictionary
+    // Write each referenced object with renumbered references
+    for (const [oldNum, rawData] of objDataMap) {
+      const newNum = renumberMap.get(oldNum);
+      xrefOffsets.set(newNum, currentOffset);
+      
+      if (rawData.type === 'stream') {
+        // Stream object: renumber dict, keep binary stream data as-is
+        const newDict = renumberRefs(rawData.dictStr, renumberMap);
+        // Replace /Length with actual byte length (in case it was indirect ref)
+        let dictLine = newDict.replace(
+          /\/Length\s+(\d+\s+\d+\s+R|\d+)/,
+          `/Length ${rawData.streamBytes.length}`
+        );
+        
+        writeStr(`${newNum} 0 obj\n${dictLine}\nstream\n`);
+        writeBytes(rawData.streamBytes);
+        writeStr(`\nendstream\nendobj\n`);
+      } else {
+        // Regular object: renumber all references in body
+        const newBody = renumberRefs(rawData.body, renumberMap);
+        writeStr(`${newNum} 0 obj\n${newBody}\nendobj\n`);
+      }
+    }
+    
+    // Write Page object
     let pageDict = '<< /Type /Page\n';
     pageDict += `  /Parent 2 0 R\n`;
-    pageDict += `  /MediaBox ${mediaBox || '[0 0 612 792]'}\n`;
+    pageDict += `  /MediaBox ${page.mediaBox || '[0 0 612 792]'}\n`;
     
-    // Add resources (simplified)
+    // Resources
     if (page.resources) {
-      if (page.resources.startsWith('<<')) {
-        pageDict += `  /Resources ${page.resources}\n`;
-      } else {
-        pageDict += `  /Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] >>\n`;
-      }
+      const renamedRes = renumberRefs(page.resources, renumberMap);
+      pageDict += `  /Resources ${renamedRes}\n`;
     } else {
       pageDict += `  /Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] >>\n`;
     }
     
-    // Reference content stream
-    if (contentRef) {
-      pageDict += `  /Contents ${contentRef} 0 R\n`;
+    // Contents
+    if (page.contents) {
+      const renamedContents = renumberRefs(page.contents, renumberMap);
+      pageDict += `  /Contents ${renamedContents}\n`;
     }
     
     pageDict += '>>';
     
-    objects.push({
-      num: pageObjNum,
-      content: pageDict
-    });
+    xrefOffsets.set(pageObjNum, currentOffset);
+    writeStr(`${pageObjNum} 0 obj\n${pageDict}\nendobj\n`);
   }
   
-  // 4.2.3: Build Catalog (Object 1)
-  objects.unshift({
-    num: 1,
-    content: '<< /Type /Catalog /Pages 2 0 R >>'
-  });
+  // Catalog (Object 1)
+  xrefOffsets.set(1, currentOffset);
+  writeStr(`1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`);
   
-  // 4.2.4: Build Pages tree (Object 2)
+  // Pages tree (Object 2)
   const kidsList = pageObjectNumbers.map(n => `${n} 0 R`).join(' ');
-  objects.unshift({
-    num: 2,
-    content: `<< /Type /Pages /Kids [${kidsList}] /Count ${pageObjectNumbers.length} >>`
-  });
+  xrefOffsets.set(2, currentOffset);
+  writeStr(`2 0 obj\n<< /Type /Pages /Kids [${kidsList}] /Count ${pageObjectNumbers.length} >>\nendobj\n`);
   
-  // 4.2.5: Write all objects and track offsets for XREF
-  const xrefOffsets = new Map();
-  
-  // Sort by object number
-  objects.sort((a, b) => a.num - b.num);
-  
-  for (const obj of objects) {
-    xrefOffsets.set(obj.num, currentOffset);
-    write(`${obj.num} 0 obj\n${obj.content}\nendobj\n`);
-  }
-  
-  // 4.2.6: Build XREF table
+  // XREF table
   const xrefOffset = currentOffset;
-  const maxObjectNumber = Math.max(...xrefOffsets.keys());
+  const maxObjNum = Math.max(...xrefOffsets.keys());
   
-  write(`xref\n`);
-  write(`0 ${maxObjectNumber + 1}\n`);
-  write(`0000000000 65535 f \n`); // Object 0 (free)
+  writeStr(`xref\n`);
+  writeStr(`0 ${maxObjNum + 1}\n`);
+  writeStr(`0000000000 65535 f \n`);
   
-  for (let i = 1; i <= maxObjectNumber; i++) {
+  for (let i = 1; i <= maxObjNum; i++) {
     if (xrefOffsets.has(i)) {
       const offset = xrefOffsets.get(i).toString().padStart(10, '0');
-      write(`${offset} 00000 n \n`);
+      writeStr(`${offset} 00000 n \n`);
     } else {
-      write(`0000000000 65535 f \n`); // Free object entry
+      writeStr(`0000000000 65535 f \n`);
     }
   }
   
-  // 4.2.7: Build Trailer
-  write(`trailer\n`);
-  write(`<< /Size ${maxObjectNumber + 1} /Root 1 0 R >>\n`);
-  write(`startxref\n`);
-  write(`${xrefOffset}\n`);
-  write(`%%EOF\n`);
+  // Trailer
+  writeStr(`trailer\n`);
+  writeStr(`<< /Size ${maxObjNum + 1} /Root 1 0 R >>\n`);
+  writeStr(`startxref\n`);
+  writeStr(`${xrefOffset}\n`);
+  writeStr(`%%EOF\n`);
   
-  // 4.2.8: Combine all parts into final Uint8Array
-  const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
+  // Combine
+  const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
   log(`  合計サイズ: ${totalLength} バイト`, 'log-info');
   
   const result = new Uint8Array(totalLength);
-  
-  let position = 0;
+  let pos = 0;
   for (const part of parts) {
-    result.set(part, position);
-    position += part.length;
+    result.set(part, pos);
+    pos += part.length;
   }
   
   return result;
