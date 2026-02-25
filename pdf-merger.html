@@ -899,9 +899,13 @@ class PDFParser {
 }
 
 // ============================================================
-//  SECTION 3: ZLIB/DEFLATE Decompression
+//  PHASE 3: ZLIB/DEFLATE Decompression & Page Extraction
+//  RFC 1950 (ZLIB) and RFC 1951 (DEFLATE) implementation
 // ============================================================
 
+/**
+ * BitStream - Bit-level reading for DEFLATE decompression
+ */
 class BitStream {
   constructor(data) {
     this.data = data;
@@ -950,7 +954,10 @@ class BitStream {
   }
 }
 
-function buildTree(lengths) {
+/**
+ * Build Huffman decoding tree from code lengths
+ */
+function buildHuffmanTree(lengths) {
   const maxLen = lengths.length === 0 ? 0 : Math.max(...lengths);
   if (maxLen === 0) return { table: new Int32Array(0), maxLen: 0 };
 
@@ -979,7 +986,7 @@ function buildTree(lengths) {
   return { table, maxLen };
 }
 
-function decodeSymbol(bs, tree) {
+function decodeHuffmanSymbol(bs, tree) {
   const { table, maxLen } = tree;
   const code = bs.peekBits(maxLen);
   const entry = table[code];
@@ -990,7 +997,8 @@ function decodeSymbol(bs, tree) {
   return sym;
 }
 
-function fixedLitLenTree() {
+// Fixed Huffman trees (RFC 1951)
+function createFixedLitLenTree() {
   const lens = [];
   for (let i = 0; i <= 287; i++) {
     if (i <= 143) lens.push(8);
@@ -998,28 +1006,29 @@ function fixedLitLenTree() {
     else if (i <= 279) lens.push(7);
     else lens.push(8);
   }
-  return buildTree(lens);
+  return buildHuffmanTree(lens);
 }
 
-function fixedDistTree() {
-  return buildTree(new Array(32).fill(5));
+function createFixedDistTree() {
+  return buildHuffmanTree(new Array(32).fill(5));
 }
 
-function readDynamicTrees(bs) {
+function readDynamicHuffmanTrees(bs) {
   const hlit = bs.readBits(5) + 257;
   const hdist = bs.readBits(5) + 1;
   const hclen = bs.readBits(4) + 4;
   const codeLenOrder = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
   const codeLenLens = new Array(19).fill(0);
   for (let i = 0; i < hclen; i++) codeLenLens[codeLenOrder[i]] = bs.readBits(3);
-  const clTree = buildTree(codeLenLens);
+  const clTree = buildHuffmanTree(codeLenLens);
   const lengths = [];
   while (lengths.length < hlit + hdist) {
-    const sym = decodeSymbol(bs, clTree);
+    const sym = decodeHuffmanSymbol(bs, clTree);
     if (sym < 16) lengths.push(sym);
     else if (sym === 16) {
       const rep = bs.readBits(2) + 3;
-      for (let i = 0; i < rep; i++) lengths.push(lengths[lengths.length - 1]);
+      const last = lengths[lengths.length - 1];
+      for (let i = 0; i < rep; i++) lengths.push(last);
     } else if (sym === 17) {
       const rep = bs.readBits(3) + 3;
       for (let i = 0; i < rep; i++) lengths.push(0);
@@ -1029,8 +1038,8 @@ function readDynamicTrees(bs) {
     }
   }
   return {
-    litLenTree: buildTree(lengths.slice(0, hlit)),
-    distTree: buildTree(lengths.slice(hlit))
+    litLenTree: buildHuffmanTree(lengths.slice(0, hlit)),
+    distTree: buildHuffmanTree(lengths.slice(hlit))
   };
 }
 
@@ -1041,14 +1050,14 @@ function inflateBlock(bs, out, litLenTree, distTree) {
   const distBase = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
 
   while (true) {
-    const sym = decodeSymbol(bs, litLenTree);
-    if (sym === 256) break;
+    const sym = decodeHuffmanSymbol(bs, litLenTree);
+    if (sym === 256) break; // End of block
     if (sym < 256) {
       out.push(sym);
     } else {
       const li = sym - 257;
       const length = lenBase[li] + bs.readBits(lenExtra[li]);
-      const di = decodeSymbol(bs, distTree);
+      const di = decodeHuffmanSymbol(bs, distTree);
       const dist = distBase[di] + bs.readBits(distExtra[di]);
       const start = out.length - dist;
       for (let i = 0; i < length; i++) out.push(out[start + i]);
@@ -1056,6 +1065,9 @@ function inflateBlock(bs, out, litLenTree, distTree) {
   }
 }
 
+/**
+ * DEFLATE decompression (RFC 1951)
+ */
 function inflate(data) {
   const bs = new BitStream(data);
   const out = [];
@@ -1065,28 +1077,255 @@ function inflate(data) {
     bFinal = bs.readBits(1);
     const bType = bs.readBits(2);
     if (bType === 0) {
-      // No compression
+      // Non-compressed block
       bs.align();
       const len = bs.readUint16LE();
       const nlen = bs.readUint16LE();
       for (let i = 0; i < len; i++) out.push(bs.readByte());
     } else if (bType === 1) {
       // Fixed Huffman
-      inflateBlock(bs, out, fixedLitLenTree(), fixedDistTree());
+      inflateBlock(bs, out, createFixedLitLenTree(), createFixedDistTree());
     } else if (bType === 2) {
       // Dynamic Huffman
-      const { litLenTree, distTree } = readDynamicTrees(bs);
+      const { litLenTree, distTree } = readDynamicHuffmanTrees(bs);
       inflateBlock(bs, out, litLenTree, distTree);
     } else {
-      throw new Error('Invalid btype');
+      throw new Error('Invalid block type');
     }
   }
   return new Uint8Array(out);
 }
 
+/**
+ * ZLIB decompression (RFC 1950)
+ * Skips 2-byte header and 4-byte Adler-32 checksum
+ */
 function zlibInflate(data) {
-  // Skip 2-byte zlib header (CMF, FLG)
+  if (data.length < 2) throw new Error('Invalid ZLIB data');
+  // Check CMF (Compression Method and flags)
+  const cmf = data[0];
+  if ((cmf & 0x0f) !== 8) throw new Error('Unsupported compression method');
+  // Skip header and decompress DEFLATE data
   return inflate(data.slice(2));
+}
+
+// ============================================================
+//  Page Extraction
+// ============================================================
+
+/**
+ * Extract value from PDF dictionary by key
+ */
+function extractDictValue(dict, key) {
+  const pattern = new RegExp('/' + key + '(?:\\s+|\\s*<<)');
+  const match = pattern.exec(dict);
+  if (!match) return null;
+
+  const start = match.index + match[0].length - (match[0].includes('<<') ? 2 : 0);
+  const rest = dict.slice(start).trimStart();
+
+  // Nested dictionary << >>
+  if (rest.startsWith('<<')) {
+    let depth = 0, i = 0;
+    while (i < rest.length) {
+      if (rest[i] === '<' && rest[i + 1] === '<') { depth++; i += 2; }
+      else if (rest[i] === '>' && rest[i + 1] === '>') { depth--; i += 2; if (depth === 0) return rest.slice(0, i); }
+      else i++;
+    }
+    return rest.slice(0, i);
+  }
+
+  // Array [ ]
+  if (rest.startsWith('[')) {
+    let depth = 0, i = 0;
+    while (i < rest.length) {
+      if (rest[i] === '[') depth++;
+      else if (rest[i] === ']') { depth--; if (depth === 0) return rest.slice(0, i + 1); }
+      i++;
+    }
+  }
+
+  // Reference "N G R" or name /Value
+  const valueMatch = rest.match(/^(\d+\s+\d+\s+R|\/[^\s\[\]<>]+|\S+)/);
+  return valueMatch ? valueMatch[0] : null;
+}
+
+/**
+ * Parse object reference "N G R"
+ */
+function parseObjectRef(str) {
+  if (!str) return null;
+  const match = str.trim().match(/^(\d+)\s+(\d+)\s+R$/);
+  if (!match) return null;
+  return { num: parseInt(match[1], 10), gen: parseInt(match[2], 10) };
+}
+
+/**
+ * Extract raw stream data from object
+ */
+function extractStreamData(pdfString, offset, parser) {
+  const objMarker = pdfString.indexOf(' obj', offset);
+  if (objMarker === -1) return null;
+
+  let pos = objMarker + 4;
+  while (pos < pdfString.length && ' \t\r\n'.includes(pdfString[pos])) pos++;
+
+  // Find dictionary end
+  const dictEnd = parser.findMatchingDelimiter(pdfString, pos, '<<', '>>');
+  const dictStr = pdfString.slice(pos, dictEnd);
+
+  const lengthVal = extractDictValue(dictStr, 'Length');
+  const filterVal = extractDictValue(dictStr, 'Filter');
+
+  // Find stream content
+  let streamPos = pdfString.indexOf('stream', dictEnd);
+  if (streamPos === -1) return null;
+  streamPos += 6;
+
+  // Skip line ending after "stream"
+  if (pdfString[streamPos] === '\r') streamPos++;
+  if (pdfString[streamPos] === '\n') streamPos++;
+
+  let endPos = pdfString.indexOf('endstream', streamPos);
+  if (endPos === -1) return null;
+
+  const streamData = pdfString.slice(streamPos, endPos);
+
+  return {
+    dictStr,
+    streamData,
+    filter: filterVal
+  };
+}
+
+/**
+ * Decompress stream if needed
+ */
+function decompressStream(streamInfo) {
+  const { streamData, filter } = streamInfo;
+
+  if (!filter || !filter.includes('FlateDecode')) {
+    return streamData;
+  }
+
+  const bytes = Uint8Array.from(streamData, c => c.charCodeAt(0));
+  try {
+    const decompressed = zlibInflate(bytes);
+    // Convert back to string
+    let result = '';
+    const CHUNK = 8192;
+    for (let i = 0; i < decompressed.length; i += CHUNK) {
+      result += String.fromCharCode(...decompressed.subarray(i, i + CHUNK));
+    }
+    return result;
+  } catch (e) {
+    console.warn('ストリーム解凍に失敗、生データを使用:', e.message);
+    return streamData;
+  }
+}
+
+/**
+ * Extract pages from PDF by following Pages tree
+ */
+function extractPages(parser, rawPdf) {
+  const pages = [];
+
+  if (!parser.trailer.root) {
+    throw new Error('文書カタログ(/Root)が見つかりません');
+  }
+
+  // Get Catalog
+  const catalog = parser.getObject(parser.trailer.root.num);
+  if (!catalog) {
+    throw new Error('カタログオブジェクトの取得に失敗');
+  }
+
+  // Get Pages reference
+  const pagesRef = extractDictValue(catalog.body, 'Pages');
+  const pagesRefObj = parseObjectRef(pagesRef);
+  if (!pagesRefObj) {
+    throw new Error('ページツリー(/Pages)が見つかりません');
+  }
+
+  // Recursively collect pages from Pages tree
+  collectPagesFromTree(parser, pagesRefObj.num, pages, rawPdf);
+
+  return pages;
+}
+
+/**
+ * Recursively collect pages from Pages tree
+ */
+function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
+  const node = parser.getObject(nodeNum);
+  if (!node) return;
+
+  const type = extractDictValue(node.body, 'Type');
+
+  if (type === '/Page') {
+    // Leaf page
+    const mediaBox = extractDictValue(node.body, 'MediaBox') || '[0 0 612 792]';
+    const contents = extractDictValue(node.body, 'Contents');
+    const resources = extractDictValue(node.body, 'Resources');
+
+    pages.push({
+      objNum: nodeNum,
+      mediaBox,
+      contents,
+      resources,
+      body: node.body
+    });
+  } else if (type === '/Pages') {
+    // Intermediate node - process Kids
+    const kidsVal = extractDictValue(node.body, 'Kids');
+    if (kidsVal && kidsVal.startsWith('[')) {
+      // Array of references
+      const refs = kidsVal.slice(1, -1).match(/\d+\s+\d+\s+R/g) || [];
+      for (const ref of refs) {
+        const refObj = parseObjectRef(ref);
+        if (refObj) {
+          collectPagesFromTree(parser, refObj.num, pages, rawPdf);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Collect all content streams for a page
+ */
+function collectPageContent(page, parser, rawPdf) {
+  const contents = [];
+
+  if (!page.contents) return contents;
+
+  if (page.contents.startsWith('[')) {
+    // Array of content streams
+    const refs = page.contents.slice(1, -1).match(/\d+\s+\d+\s+R/g) || [];
+    for (const ref of refs) {
+      const refObj = parseObjectRef(ref);
+      if (refObj) {
+        const streamInfo = extractStreamData(rawPdf, parser.offsets.get(refObj.num), parser);
+        if (streamInfo) {
+          contents.push(decompressStream(streamInfo));
+        }
+      }
+    }
+  } else {
+    // Single content stream
+    const refObj = parseObjectRef(page.contents);
+    if (refObj) {
+      const offset = parser.offsets.get(refObj.num);
+      if (offset !== undefined && offset !== null) {
+        const streamInfo = extractStreamData(rawPdf, offset, parser);
+        if (streamInfo) {
+          contents.push(decompressStream(streamInfo));
+        }
+      }
+    }
+  }
+
+  return contents;
 }
 
 // ============================================================
