@@ -364,8 +364,9 @@
 //  Network Isolation: No external data transmission
 // ============================================================
 
+// 重要: この関数はスクリプトの最初に即座に実行され、
+// 他のすべてのコードより先にネットワークAPIを上書きします
 // ---- ネットワーク分離検証（Network Isolation Verification） ----
-// fetch/XHRを遮断して外部へのデータ漏洩を防止
 (function setupNetworkIsolation() {
   'use strict';
   
