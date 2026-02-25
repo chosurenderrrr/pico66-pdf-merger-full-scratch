@@ -1329,324 +1329,197 @@ function collectPageContent(page, parser, rawPdf) {
 }
 
 // ============================================================
-//  SECTION 4: PDF Merge Logic
+//  PHASE 4: PDF Builder - Merged PDF Construction
 // ============================================================
 
-function extractDictValue(dict, key) {
-  const re = new RegExp('/' + key + '\\s+');
-  const m = re.exec(dict);
-  if (!m) return null;
-  const rest = dict.slice(m.index + m[0].length);
-  
-  if (rest.startsWith('<<')) {
-    let depth = 0, i = 0;
-    while (i < rest.length) {
-      if (rest[i] === '<' && rest[i + 1] === '<') { depth++; i += 2; }
-      else if (rest[i] === '>' && rest[i + 1] === '>') { depth--; i += 2; if (depth === 0) return rest.slice(0, i); }
-      else i++;
-    }
-    return rest.slice(0, i);
-  }
-  
-  if (rest.startsWith('[')) {
-    let depth = 0, i = 0;
-    while (i < rest.length) {
-      if (rest[i] === '[') depth++;
-      else if (rest[i] === ']') { depth--; if (depth === 0) return rest.slice(0, i + 1); }
-      i++;
-    }
-  }
-  
-  const vm = rest.match(/^[\d\s]+R|^\/\S+|^\S+/);
-  return vm ? vm[0] : null;
-}
-
-function parseRef(str) {
-  if (!str) return null;
-  const m = str.trim().match(/^(\d+)\s+(\d+)\s+R/);
-  if (!m) return null;
-  return { num: parseInt(m[1]), gen: parseInt(m[2]) };
-}
-
-function extractStream(raw, offset, parser) {
-  const s = raw;
-  const objStart = s.indexOf(' obj', offset) + 4;
-  let pos = objStart;
-  while (pos < s.length && ' \t\r\n'.includes(s[pos])) pos++;
-
-  const dictEnd = parser.findDictEnd(s, pos);
-  const dictStr = s.slice(pos, dictEnd);
-
-  const lengthVal = extractDictValue(dictStr, 'Length');
-  const filterVal = extractDictValue(dictStr, 'Filter');
-
-  let streamPos = s.indexOf('stream', dictEnd);
-  if (streamPos < 0) return null;
-  streamPos += 6;
-  if (s[streamPos] === '\r') streamPos++;
-  if (s[streamPos] === '\n') streamPos++;
-
-  let endStream = s.indexOf('endstream', streamPos);
-  if (endStream < 0) return null;
-
-  const streamData = s.slice(streamPos, endStream);
-  return { dictStr, streamData, filterVal };
-}
-
-function decompressStream(streamData, filterVal) {
-  if (!filterVal || !filterVal.includes('FlateDecode')) {
-    return streamData;
-  }
-  
-  const bytes = Uint8Array.from(streamData, c => c.charCodeAt(0));
-  try {
-    const decoded = zlibInflate(bytes);
-    // Convert back to string
-    const CHUNK = 8192;
-    let result = '';
-    for (let i = 0; i < decoded.length; i += CHUNK) {
-      result += String.fromCharCode(...decoded.subarray(i, i + CHUNK));
-    }
-    return result;
-  } catch (e) {
-    // Return original if decompression fails
-    return streamData;
-  }
-}
-
+/**
+ * Merge multiple PDFs into a single PDF
+ * Process: Parse → Extract Pages → Build new PDF with renumbered objects
+ */
 async function mergePDFs(fileItems) {
   log('PDF結合を開始します', 'log-info');
   
-  const parsedPDFs = [];
+  const allExtractedPages = [];
   
-  // Parse all PDFs
+  // Phase 4.1: Parse and extract pages from all input PDFs
   for (let i = 0; i < fileItems.length; i++) {
     const item = fileItems[i];
-    setProgress(Math.round((i / fileItems.length) * 30), `読み込み中: ${item.name}`);
-    log(`[${i + 1}/${fileItems.length}] 読み込み: ${item.name}`);
-    
-    const buf = await item.file.arrayBuffer();
-    const parser = new PDFParser(buf);
+    const progress = Math.round((i / fileItems.length) * 40);
+    setProgress(progress, `解析中: ${item.name}`);
+    log(`[${i + 1}/${fileItems.length}] ${item.name} を解析中...`);
     
     try {
-      const { offsets, trailer } = parser.parse();
-      parsedPDFs.push({ parser, offsets, trailer, name: item.name, raw: parser.getString() });
-      log(`  → ${offsets.size} オブジェクト検出`, 'log-ok');
-    } catch (e) {
-      log(`  ✗ パースエラー: ${e.message}`, 'log-err');
-      throw new Error(`${item.name} の解析に失敗: ${e.message}`);
-    }
-  }
-  
-  setProgress(35, 'ページを収集中...');
-  
-  // Collect pages from all PDFs
-  const allPages = [];
-  
-  for (let fi = 0; fi < parsedPDFs.length; fi++) {
-    const { parser, offsets, raw } = parsedPDFs[fi];
-    setProgress(35 + Math.round((fi / parsedPDFs.length) * 35), `ページ収集: ${parsedPDFs[fi].name}`);
-    
-    // Find all page objects
-    const pageObjects = [];
-    for (const [num, offset] of offsets) {
-      if (offset === null) continue;
-      const { objBody } = parser.getObjectBytes(offset);
-      // Check for /Type /Page but not /Type /Pages
-      if (objBody.includes('/Type') && objBody.includes('/Page') && !objBody.includes('/Pages')) {
-        pageObjects.push({ num, offset, body: objBody });
-      }
-    }
-    
-    // Try to get proper order from /Pages tree
-    const orderedPages = getSortedPages(parser, offsets, pageObjects, raw);
-    log(`  → ${orderedPages.length} ページ検出`, 'log-ok');
-    
-    for (const pg of orderedPages) {
-      allPages.push({ 
-        raw, 
-        parser, 
-        offsets, 
-        pageBody: pg.body, 
-        pageNum: pg.num 
-      });
-    }
-  }
-  
-  setProgress(75, '新しいPDFを構築中...');
-  log('新しいPDFを構築しています...', 'log-info');
-  
-  // Build merged PDF
-  const pdfBytes = buildMergedPDF(allPages);
-  
-  setProgress(100, '完成！');
-  log('結合完了！', 'log-ok');
-  
-  return pdfBytes;
-}
-
-function getSortedPages(parser, offsets, pageObjects, raw) {
-  // Try to find /Pages dict and read /Kids array for proper ordering
-  const s = raw;
-  const pagesObjMatch = s.match(/\d+\s+\d+\s+obj\s*<<[^>]*\/Type\s*\/Pages[^>]*>>/g);
-  if (pagesObjMatch) {
-    const kidsMatch = pagesObjMatch[0].match(/\/Kids\s*\[([\d\s\nR]+)\]/);
-    if (kidsMatch) {
-      const refs = kidsMatch[1].trim().split(/\s+R\s*/).filter(r => r.trim()).map(r => parseInt(r.trim().split(/\s+/)[0]));
-      const sorted = [];
-      for (const ref of refs) {
-        const found = pageObjects.find(p => p.num === ref);
-        if (found) sorted.push(found);
-      }
-      if (sorted.length > 0) return sorted;
-    }
-  }
-  // Fallback: sort by object number
-  return pageObjects.sort((a, b) => a.num - b.num);
-}
-
-function buildMergedPDF(allPages) {
-  const enc = new TextEncoder();
-  const parts = [];
-  let pos = 0;
-
-  function write(s) {
-    const b = typeof s === 'string' ? enc.encode(s) : s;
-    parts.push(b);
-    pos += b.length;
-  }
-
-  // Header
-  write('%PDF-1.4\n');
-  write('%\xE2\xE3\xCF\xD3\n');
-
-  // Object numbering:
-  // 1 = Catalog
-  // 2 = Pages
-  // 3..N = page objects and content streams
-  let nextObjNum = 3;
-  const pageObjNums = [];
-  const pendingObjs = [];
-
-  for (const page of allPages) {
-    const { raw, parser, offsets, pageBody } = page;
-    
-    // Extract page properties
-    const mediaBox = extractDictValue(pageBody, 'MediaBox') || '[0 0 595 842]';
-    const contentsRef = extractDictValue(pageBody, 'Contents');
-    const resourcesVal = extractDictValue(pageBody, 'Resources');
-    
-    // Process content stream
-    let contentObjNum = null;
-    if (contentsRef) {
-      const streamParts = [];
-      const refs = [];
+      const buffer = await item.file.arrayBuffer();
+      const parser = new PDFParser(buffer);
+      const pdfData = parser.parse();
+      const rawPdf = parser.getString();
       
-      if (contentsRef.trim().startsWith('[')) {
-        // Array of refs
-        const inner = contentsRef.slice(1, contentsRef.lastIndexOf(']'));
-        const matches = inner.matchAll(/(\d+)\s+\d+\s+R/g);
-        for (const m of matches) refs.push(parseInt(m[1]));
-      } else {
-        const r = parseRef(contentsRef);
-        if (r) refs.push(r.num);
-      }
+      // Extract pages using Phase 3 functions
+      const pages = extractPages(parser, rawPdf);
+      log(`  → ${pages.length} ページを抽出`, 'log-ok');
       
-      // Collect and decompress all streams
-      for (const refNum of refs) {
-        if (!offsets.has(refNum)) continue;
-        const offset = offsets.get(refNum);
-        if (offset === null) continue;
-        
-        const streamInfo = extractStream(raw, offset, parser);
-        if (streamInfo) {
-          const decompressed = decompressStream(streamInfo.streamData, streamInfo.filterVal);
-          streamParts.push(decompressed);
-        }
-      }
-      
-      if (streamParts.length > 0) {
-        const combinedContent = streamParts.join('\n');
-        contentObjNum = nextObjNum++;
-        pendingObjs.push({
-          num: contentObjNum,
-          data: `<< /Length ${combinedContent.length} >>\nstream\n${combinedContent}\nendstream`
+      // Collect content for each page
+      for (const page of pages) {
+        const contentStreams = collectPageContent(page, parser, rawPdf);
+        allExtractedPages.push({
+          page,
+          contentStreams,
+          mediaBox: page.mediaBox
         });
       }
+      
+    } catch (e) {
+      log(`  ✗ エラー: ${e.message}`, 'log-err');
+      throw new Error(`${item.name} の処理に失敗: ${e.message}`);
     }
+  }
+  
+  setProgress(50, '新しいPDFを構築中...');
+  log(`${allExtractedPages.length} ページから新しいPDFを構築します...`, 'log-info');
+  
+  // Phase 4.2: Build merged PDF
+  const mergedPdf = buildMergedPDF(allExtractedPages);
+  
+  setProgress(100, '完成！');
+  log('PDF結合が完了しました', 'log-ok');
+  
+  return mergedPdf;
+}
+
+/**
+ * Build a new PDF from extracted pages
+ * Object numbering scheme:
+ *   1 = Catalog
+ *   2 = Pages
+ *   3+ = Content streams (if any)
+ *   N+ = Page objects
+ */
+function buildMergedPDF(extractedPages) {
+  const encoder = new TextEncoder();
+  const parts = [];
+  let currentOffset = 0;
+  
+  function write(data) {
+    const bytes = typeof data === 'string' ? encoder.encode(data) : data;
+    parts.push(bytes);
+    currentOffset += bytes.length;
+  }
+  
+  // 4.2.1: PDF Header
+  write('%PDF-1.4\n');
+  write('%\xE2\xE3\xCF\xD3\n'); // Binary marker
+  
+  // 4.2.2: Object numbering setup
+  let nextObjectNumber = 3;
+  const pageObjectNumbers = [];
+  const objects = []; // { num, content }
+  
+  // Process each page
+  for (const { page, contentStreams, mediaBox } of extractedPages) {
+    let contentRef = null;
     
-    // Process resources
-    let resourcesStr = '/Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] >>';
-    if (resourcesVal) {
-      if (resourcesVal.trim().startsWith('<<')) {
-        resourcesStr = '/Resources ' + resourcesVal;
-      } else {
-        const rRef = parseRef(resourcesVal);
-        if (rRef && offsets.has(rRef.num)) {
-          const rOffset = offsets.get(rRef.num);
-          if (rOffset !== null) {
-            const { objBody } = parser.getObjectBytes(rOffset);
-            if (objBody.trim().startsWith('<<')) {
-              resourcesStr = '/Resources ' + objBody;
-            }
-          }
-        }
-      }
+    // Create content stream object if content exists
+    if (contentStreams.length > 0) {
+      const combinedContent = contentStreams.join('\n');
+      contentRef = nextObjectNumber++;
+      
+      objects.push({
+        num: contentRef,
+        content: `<< /Length ${combinedContent.length} >>\nstream\n${combinedContent}\nendstream`
+      });
     }
     
     // Create page object
-    const pageObjNum = nextObjNum++;
-    pageObjNums.push(pageObjNum);
+    const pageObjNum = nextObjectNumber++;
+    pageObjectNumbers.push(pageObjNum);
     
-    let pageDict = `<< /Type /Page /Parent 2 0 R\n`;
-    pageDict += `/MediaBox ${mediaBox}\n`;
-    pageDict += `${resourcesStr}\n`;
-    if (contentObjNum) pageDict += `/Contents ${contentObjNum} 0 R\n`;
-    pageDict += `>>`;
+    // Build page dictionary
+    let pageDict = '<< /Type /Page\n';
+    pageDict += `  /Parent 2 0 R\n`;
+    pageDict += `  /MediaBox ${mediaBox || '[0 0 612 792]'}\n`;
     
-    pendingObjs.push({ num: pageObjNum, data: pageDict });
-  }
-
-  // Build all objects
-  const allObjs = [
-    { num: 1, data: `<< /Type /Catalog /Pages 2 0 R >>` },
-    { num: 2, data: `<< /Type /Pages /Kids [${pageObjNums.map(n => n + ' 0 R').join(' ')}] /Count ${pageObjNums.length} >>` },
-    ...pendingObjs
-  ].sort((a, b) => a.num - b.num);
-
-  // Write objects and track offsets
-  const xrefOffsets = new Map();
-  for (const obj of allObjs) {
-    xrefOffsets.set(obj.num, pos);
-    write(`${obj.num} 0 obj\n${obj.data}\nendobj\n`);
-  }
-
-  // XREF table
-  const xrefPos = pos;
-  const maxObj = Math.max(...xrefOffsets.keys());
-  write(`xref\n0 ${maxObj + 1}\n`);
-  write(`0000000000 65535 f \n`);
-  for (let i = 1; i <= maxObj; i++) {
-    if (xrefOffsets.has(i)) {
-      write((xrefOffsets.get(i) + '').padStart(10, '0') + ' 00000 n \n');
+    // Add resources (simplified)
+    if (page.resources) {
+      if (page.resources.startsWith('<<')) {
+        pageDict += `  /Resources ${page.resources}\n`;
+      } else {
+        pageDict += `  /Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] >>\n`;
+      }
     } else {
-      write(`0000000000 65535 f \n`);
+      pageDict += `  /Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] >>\n`;
+    }
+    
+    // Reference content stream
+    if (contentRef) {
+      pageDict += `  /Contents ${contentRef} 0 R\n`;
+    }
+    
+    pageDict += '>>';
+    
+    objects.push({
+      num: pageObjNum,
+      content: pageDict
+    });
+  }
+  
+  // 4.2.3: Build Catalog (Object 1)
+  objects.unshift({
+    num: 1,
+    content: '<< /Type /Catalog /Pages 2 0 R >>'
+  });
+  
+  // 4.2.4: Build Pages tree (Object 2)
+  const kidsList = pageObjectNumbers.map(n => `${n} 0 R`).join(' ');
+  objects.unshift({
+    num: 2,
+    content: `<< /Type /Pages /Kids [${kidsList}] /Count ${pageObjectNumbers.length} >>`
+  });
+  
+  // 4.2.5: Write all objects and track offsets for XREF
+  const xrefOffsets = new Map();
+  
+  // Sort by object number
+  objects.sort((a, b) => a.num - b.num);
+  
+  for (const obj of objects) {
+    xrefOffsets.set(obj.num, currentOffset);
+    write(`${obj.num} 0 obj\n${obj.content}\nendobj\n`);
+  }
+  
+  // 4.2.6: Build XREF table
+  const xrefOffset = currentOffset;
+  const maxObjectNumber = Math.max(...xrefOffsets.keys());
+  
+  write(`xref\n`);
+  write(`0 ${maxObjectNumber + 1}\n`);
+  write(`0000000000 65535 f \n`); // Object 0 (free)
+  
+  for (let i = 1; i <= maxObjectNumber; i++) {
+    if (xrefOffsets.has(i)) {
+      const offset = xrefOffsets.get(i).toString().padStart(10, '0');
+      write(`${offset} 00000 n \n`);
+    } else {
+      write(`0000000000 65535 f \n`); // Free object entry
     }
   }
-
-  // Trailer
-  write(`trailer\n<< /Size ${maxObj + 1} /Root 1 0 R >>\n`);
-  write(`startxref\n${xrefPos}\n%%EOF\n`);
-
-  // Combine all parts
-  let totalLen = 0;
-  for (const p of parts) totalLen += p.length;
-  const result = new Uint8Array(totalLen);
-  let off = 0;
-  for (const p of parts) {
-    result.set(p, off);
-    off += p.length;
+  
+  // 4.2.7: Build Trailer
+  write(`trailer\n`);
+  write(`<< /Size ${maxObjectNumber + 1} /Root 1 0 R >>\n`);
+  write(`startxref\n`);
+  write(`${xrefOffset}\n`);
+  write(`%%EOF\n`);
+  
+  // 4.2.8: Combine all parts into final Uint8Array
+  const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
+  const result = new Uint8Array(totalLength);
+  
+  let position = 0;
+  for (const part of parts) {
+    result.set(part, position);
+    position += part.length;
   }
+  
   return result;
 }
 
