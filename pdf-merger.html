@@ -1125,9 +1125,8 @@ class RawInflate {
     this.ip = optParams.index || 0;
     this.bitsbuf = 0;
     this.bitsbuflen = 0;
-    // 초기 버퍼 크기: 입력 크기의 10배 또는 최소 32KB
-    const initialSize = optParams.bufferSize || Math.max(0x8000, input.length * 10);
-    this.output = new Uint8Array(initialSize);
+    // 초기 버퍼 크기: 고정 32KB (너무 크면 메모리 문제 발생)
+    this.output = new Uint8Array(optParams.bufferSize || 0x8000);
     this.op = 0;
     this.bfinal = false;
     this.bufferType = RawInflate.BufferType.ADAPTIVE;
@@ -1371,20 +1370,12 @@ class RawInflate {
   }
   
   expandBuffer(optParam = {}) {
-    // 안전한 비율 계산 (최소 2배, 최대 4배)
-    let ratio = 2;
-    if (optParam.fixRatio) {
-      ratio = optParam.fixRatio;
-    } else if (this.ip > 0 && this.input.length > this.ip) {
-      // 남은 입력 크기를 기반으로 비율 추정
-      const remainingRatio = this.input.length / this.ip;
-      ratio = Math.min(Math.max(2, remainingRatio), 4);
-    }
-    
+    // 고정 2배 확장 (복잡한 계산은 버그의 원인)
+    const ratio = optParam.fixRatio || 2;
     const newSize = Math.floor(this.output.length * ratio);
     
-    // 최대 버퍼 크기 제한 (64MB)
-    const MAX_BUFFER_SIZE = 64 * 1024 * 1024;
+    // 최대 버퍼 크기 제한 (1MB로 더 낮게 설정)
+    const MAX_BUFFER_SIZE = 1 * 1024 * 1024;
     if (newSize > MAX_BUFFER_SIZE) {
       throw new Error(`버퍼 크기가 너무 큽니다: ${newSize}`);
     }
