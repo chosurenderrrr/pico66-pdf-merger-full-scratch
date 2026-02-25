@@ -355,28 +355,11 @@
   .log .log-err { color: var(--danger); }
   .log .log-info { color: var(--accent); }
 
-  .badge {
-    display: inline-block;
-    padding: 4px 10px;
-    border-radius: 99px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    background: rgba(8, 72, 135, 0.1);
-    color: var(--primary);
-    margin-left: 8px;
-    vertical-align: middle;
-  }
-
-  [data-theme="dark"] .badge {
-    background: rgba(59, 130, 246, 0.15);
-  }
-
   footer {
     color: var(--text-muted);
-    font-size: 0.8125rem;
+    font-size: 0.75rem;
     text-align: center;
     margin-top: 32px;
-    font-weight: 500;
   }
 </style>
 </head>
@@ -386,24 +369,22 @@
 
 <header>
   <h1>PDF Merger</h1>
-  <p>外部ライブラリ不使用 — フルスクラッチ実装 <span class="badge">Pure JS</span></p>
 </header>
 
 <div class="card">
   <div class="drop-zone" id="dropZone">
     <input type="file" accept=".pdf" multiple id="fileInput">
     <span class="drop-icon">📄</span>
-    <h3>PDFをドロップ または クリックして選択</h3>
-    <p>複数ファイルを選択可能。ドラッグで順番を変更できます。</p>
+    <h3>PDFをドロップまたはクリック</h3>
   </div>
 
   <div class="file-list" id="fileList"></div>
-  <p class="order-hint" id="orderHint" style="display:none">↕ ドラッグで順番を並び替えできます</p>
+  <p class="order-hint" id="orderHint" style="display:none">↕ ドラッグで並び替え</p>
 </div>
 
 <div class="card">
   <button class="btn btn-primary" id="mergeBtn" disabled>
-    ⬇ PDFを結合してダウンロード
+    結合してダウンロード
   </button>
 
   <div class="progress-wrap" id="progressWrap">
@@ -417,7 +398,7 @@
   <div class="log" id="log"></div>
 </div>
 
-<footer>すべての処理はブラウザ内で行われます。ファイルはサーバーにアップロードされません。</footer>
+
 
 <script>
 // ============================================================
