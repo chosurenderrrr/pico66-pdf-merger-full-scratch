@@ -1573,16 +1573,25 @@ function extractPages(parser, rawPdf) {
  * Recursively collect pages from Pages tree
  */
 function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
+  console.log('[DEBUG] collectPagesFromTree:', nodeNum);
   const node = parser.getObject(nodeNum);
-  if (!node) return;
+  if (!node) {
+    console.warn('[DEBUG] Node not found:', nodeNum);
+    return;
+  }
 
   const type = extractDictValue(node.body, 'Type');
+  console.log('[DEBUG] Node', nodeNum, 'type:', type);
 
   if (type === '/Page') {
     // Leaf page
     const mediaBox = extractDictValue(node.body, 'MediaBox') || '[0 0 612 792]';
     const contents = extractDictValue(node.body, 'Contents');
     const resources = extractDictValue(node.body, 'Resources');
+
+    console.log('[DEBUG] Page found, mediaBox:', mediaBox);
+    console.log('[DEBUG] Page contents:', contents);
+    console.log('[DEBUG] Page resources:', resources);
 
     pages.push({
       objNum: nodeNum,
@@ -1594,9 +1603,11 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
   } else if (type === '/Pages') {
     // Intermediate node - process Kids
     const kidsVal = extractDictValue(node.body, 'Kids');
+    console.log('[DEBUG] Pages node, kids:', kidsVal ? kidsVal.substring(0, 100) : 'null');
     if (kidsVal && kidsVal.startsWith('[')) {
       // Array of references
       const refs = kidsVal.slice(1, -1).match(/\d+\s+\d+\s+R/g) || [];
+      console.log('[DEBUG] Found', refs.length, 'kids');
       for (const ref of refs) {
         const refObj = parseObjectRef(ref);
         if (refObj) {
@@ -1604,6 +1615,8 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
         }
       }
     }
+  } else {
+    console.warn('[DEBUG] Unknown node type:', type);
   }
 }
 
@@ -1614,44 +1627,74 @@ function collectPagesFromTree(parser, nodeNum, pages, rawPdf) {
 async function collectPageContent(page, parser, rawPdf) {
   const contents = [];
 
-  if (!page.contents) return contents;
+  console.log('[DEBUG] collectPageContent called, page.contents:', page.contents);
+
+  if (!page.contents) {
+    console.log('[DEBUG] page.contents is null/undefined');
+    return contents;
+  }
+
+  console.log('[DEBUG] page.contents type:', typeof page.contents, 'value:', page.contents.substring(0, 50));
 
   if (page.contents.startsWith('[')) {
     // Array of content streams
+    console.log('[DEBUG] Contents is array');
     const refs = page.contents.slice(1, -1).match(/\d+\s+\d+\s+R/g) || [];
+    console.log('[DEBUG] Found refs:', refs.length);
     for (const ref of refs) {
       const refObj = parseObjectRef(ref);
       if (refObj) {
-        const streamInfo = extractStreamData(rawPdf, parser.offsets.get(refObj.num), parser);
+        console.log('[DEBUG] Processing ref:', refObj.num, refObj.gen);
+        const offset = parser.offsets.get(refObj.num);
+        console.log('[DEBUG] Offset for obj', refObj.num, ':', offset);
+        if (offset === undefined || offset === null) {
+          console.warn('[DEBUG] No offset found for obj', refObj.num);
+          continue;
+        }
+        const streamInfo = extractStreamData(rawPdf, offset, parser);
+        console.log('[DEBUG] streamInfo:', streamInfo ? 'found' : 'null');
         if (streamInfo) {
+          console.log('[DEBUG] filter:', streamInfo.filter, 'length:', streamInfo.length);
           try {
             const decompressed = await decompressStream(streamInfo);
+            console.log('[DEBUG] Decompressed length:', decompressed ? decompressed.length : 0);
             if (decompressed) contents.push(decompressed);
           } catch (e) {
-            console.warn('ストリーム解凍失敗:', e.message);
+            console.error('[DEBUG] ストリーム解凍失敗:', e.message, e.stack);
           }
         }
       }
     }
   } else {
     // Single content stream
+    console.log('[DEBUG] Contents is single ref');
     const refObj = parseObjectRef(page.contents);
+    console.log('[DEBUG] Parsed ref:', refObj);
     if (refObj) {
       const offset = parser.offsets.get(refObj.num);
+      console.log('[DEBUG] Offset for obj', refObj.num, ':', offset);
       if (offset !== undefined && offset !== null) {
         const streamInfo = extractStreamData(rawPdf, offset, parser);
+        console.log('[DEBUG] streamInfo:', streamInfo ? 'found' : 'null');
         if (streamInfo) {
+          console.log('[DEBUG] filter:', streamInfo.filter, 'length:', streamInfo.length);
           try {
             const decompressed = await decompressStream(streamInfo);
+            console.log('[DEBUG] Decompressed length:', decompressed ? decompressed.length : 0);
             if (decompressed) contents.push(decompressed);
           } catch (e) {
-            console.warn('ストリーム解凍失敗:', e.message);
+            console.error('[DEBUG] ストリーム解凍失敗:', e.message, e.stack);
           }
         }
+      } else {
+        console.warn('[DEBUG] No offset found for obj', refObj.num);
       }
+    } else {
+      console.warn('[DEBUG] Failed to parse ref from:', page.contents);
     }
   }
 
+  console.log('[DEBUG] Returning contents count:', contents.length);
   return contents;
 }
 
