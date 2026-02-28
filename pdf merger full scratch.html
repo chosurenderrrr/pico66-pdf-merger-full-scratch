@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>PDF Merger - デバッグ強化版</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    #output { background: #f4f4f4; padding: 10px; font-size: 11px; max-height: 500px; overflow-y: auto; }
+    button { margin-top: 10px; padding: 8px 20px; font-size: 14px; cursor: pointer; }
+    button:disabled { opacity: 0.4; }
+  </style>
+</head>
+<body>
+  <h2>PDF結合ツール</h2>
+  <input type="file" id="fileInput" accept=".pdf" multiple>
+  <br>
+  <button id="mergeBtn" disabled>結合してダウンロード</button>
+  <pre id="output">PDFを複数選択してください</pre>
+
+  <script type="module">
+
+    // =====================================================
+    // ユーティリティ
+    // =====================================================
+
+    function decodeLatin1(uint8array) {
+      let str = '';
+      const chunk = 65536;
+      for (let i = 0; i < uint8array.length; i += chunk)
+        str += String.fromCharCode(...uint8array.subarray(i, i + chunk));
+      return str;
+    }
+
+    function findDictEnd(text, start) {
+      let depth = 0, i = start;
+      while (i < text.length) {
+        if (text[i] === '<' && text[i+1] === '<') { depth++; i += 2; }
+        else if (text[i] === '>' && text[i+1] === '>') {
+          if (--depth === 0) return i;
+          i += 2;
+        } else i++;
+      }
+      throw new Error('Unclosed dictionary');
+    }
+
+    // ★修正: /Name /Value の Value として /Name2 形式（名前オブジェクト）を正しく取る
+    function parseDict(text) {
+      const result = {};
+      const start = text.indexOf('<<');
+      if (start === -1) return result;
+      const end = findDictEnd(text, start);
+      const inner = text.slice(start + 2, end);
+
+      let i = 0;
+      while (i < inner.length) {
+        // キー: /Xxx
+        while (i < inner.length && inner[i] !== '/') i++;
+        if (i >= inner.length) break;
+        i++; // '/' をスキップ
+        let keyEnd = i;
+        while (keyEnd < inner.length && /[\w]/.test(inner[keyEnd])) keyEnd++;
+        const key = inner.slice(i, keyEnd);
+        i = keyEnd;
+
+        // 値をパース
+        while (i < inner.length && /[ \t\r\n]/.test(inner[i])) i++;
+        const value = parseDictValue(inner, i);
+        result[key] = value.val;
+        i = value.end;
+      }
+      return result;
+    }
+
+    function parseDictValue(text, i) {
+      // 入れ子辞書
+      if (text[i] === '<' && text[i+1] === '<') {
+        const end = findDictEnd(text, i);
+        return { val: text.slice(i, end + 2), end: end + 2 };
+      }
+      // 配列
+      if (text[i] === '[') {
+        let depth = 0, j = i;
+        while (j < text.length) {
+          if (text[j] === '[') depth++;
+          else if (text[j] === ']') { if (--depth === 0) return { val: text.slice(i, j+1), end: j+1 }; }
+          j++;
+        }
+        return { val: text.slice(i), end: text.length };
+      }
+      // 名前オブジェクト /Xxx → 値として "/Xxx" を返す
+      if (text[i] === '/') {
+        let j = i + 1;
+        while (j < text.length && /[\w+\-]/.test(text[j])) j++;
+        return { val: text.slice(i, j), end: j };
+      }
+      // 間接参照 N G R
+      const refMatch = text.slice(i).match(/^(\d+)\s+(\d+)\s+R/);
+      if (refMatch) return { val: `${refMatch[1]} ${refMatch[2]} R`, end: i + refMatch[0].length };
+      // リテラル文字列 (...)
+      if (text[i] === '(') {
+        let depth = 0, j = i;
+        while (j < text.length) {
+          if (text[j] === '\\') { j += 2; continue; }
+          if (text[j] === '(') depth++;
+          else if (text[j] === ')') { if (--depth === 0) return { val: text.slice(i, j+1), end: j+1 }; }
+          j++;
+        }
+      }
+      // 16進文字列 <...>
+      if (text[i] === '<' && text[i+1] !== '<') {
+        const j = text.indexOf('>', i);
+        return { val: text.slice(i, j+1), end: j+1 };
+      }
+      // 数値・真偽値・null など（次の空白か特殊文字まで）
+      const m = text.slice(i).match(/^[^\s/<>\[\]()]+/);
+      if (m) return { val: m[0], end: i + m[0].length };
+      return { val: '', end: i + 1 };
+    }
+
+    // =====================================================
+    // パーサー
+    // =====================================================
+
+    function parsePDF(data) {
+      const text = decodeLatin1(data);
+      if (!text.startsWith('%PDF-')) throw new Error('Not a valid PDF file');
+      const version = text.slice(5, 8);
+
+      const all = [...text.matchAll(/startxref\s+(\d+)/g)];
+      if (!all.length) throw new Error('Cannot find startxref');
+      const xrefOffset = parseInt(all.at(-1)[1], 10);
+
+      const xrefArea = text.slice(xrefOffset, xrefOffset + 20).trimStart();
+      let xref, trailer;
+      if (/^\d+ \d+ obj/.test(xrefArea)) {
+        xref = new Map();
+        trailer = extractXrefStreamTrailer(text, xrefOffset);
+      } else {
+        xref = parseXref(text, xrefOffset);
+        trailer = parseTrailer(text, xrefOffset);
+      }
+
+      const objects = parseObjects(text, data);
+      return { version, xref, trailer, objects, rawText: text, rawData: data };
+    }
+
+    function extractXrefStreamTrailer(text, offset) {
+      const chunk = text.slice(offset, offset + 512);
+      const dictStart = chunk.indexOf('<<');
+      if (dictStart === -1) throw new Error('xref stream dict not found');
+      return parseDict(chunk.slice(dictStart, findDictEnd(chunk, dictStart) + 2));
+    }
+
+    function parseXref(text, offset) {
+      const xref = new Map();
+      let pos = offset;
+      if (text.slice(pos, pos + 4) !== 'xref') throw new Error(`Expected 'xref' at ${pos}`);
+      pos += 4;
+      while (pos < text.length && /\s/.test(text[pos])) pos++;
+      while (pos < text.length) {
+        if (text.slice(pos, pos + 7) === 'trailer') break;
+        const lineEnd = text.indexOf('\n', pos);
+        if (lineEnd === -1) break;
+        const line = text.slice(pos, lineEnd).trim();
+        pos = lineEnd + 1;
+        if (!/^\d+ \d+$/.test(line)) continue;
+        const [startObj, count] = line.split(/\s+/).map(Number);
+        for (let i = 0; i < count; i++) {
+          const entry = text.slice(pos, pos + 20);
+          pos += 20;
+          const parts = entry.trim().split(/\s+/);
+          if (parts.length < 3) continue;
+          xref.set(startObj + i, {
+            byteOffset: parseInt(parts[0], 10),
+            gen: parseInt(parts[1], 10),
+            inUse: parts[2] === 'n',
+          });
+        }
+        while (pos < text.length && /\s/.test(text[pos])) pos++;
+      }
+      return xref;
+    }
+
+    function parseTrailer(text, xrefOffset) {
+      let searchFrom = xrefOffset, trailerIdx = -1, found;
+      while ((found = text.indexOf('trailer', searchFrom)) !== -1) {
+        trailerIdx = found; searchFrom = found + 1;
+      }
+      if (trailerIdx === -1) throw new Error('trailer not found');
+      const dictStart = text.indexOf('<<', trailerIdx);
+      return parseDict(text.slice(dictStart, findDictEnd(text, dictStart) + 2));
+    }
+
+function parseObjects(text, rawData) {
+  const objects = new Map();
+  const objRegex = /(\d+)\s+(\d+)\s+obj\b/g;
+  let match;
+
+  while ((match = objRegex.exec(text)) !== null) {
+    const objNum = parseInt(match[1], 10);
+    const gen = parseInt(match[2], 10);
+    const objStart = match.index;
+    const contentStart = objStart + match[0].length;
+    const endObjIdx = text.indexOf('endobj', contentStart);
+    if (endObjIdx === -1) continue;
+
+    const content = text.slice(contentStart, endObjIdx).trim();
+    const key = `${objNum} ${gen}`;
+
+    // 辞書を探す
+    const dictStart = content.indexOf('<<');
+    let dict = null;
+    let lengthRaw = null;
+    let hasStream = false;
+    let streamDataStart = null;
+
+    if (dictStart !== -1) {
+      try {
+        const dictEnd = findDictEnd(content, dictStart);
+        const dictText = content.slice(dictStart, dictEnd + 2);
+        dict = parseDict(dictText);
+        lengthRaw = dict['Length'] ?? null;
+
+        // 辞書の終端より後に stream キーワードがあるか
+        const rest = content.slice(dictEnd + 2);
+        if (/[\r\n]\s*stream[\r\n]|>>\s*stream[\r\n]/.test(rest) || /^\s*stream[\r\n]/.test(rest)) {
+          hasStream = true;
+
+          // rawText 上で "N G obj" の位置から stream\n を探す
+          const searchFrom = objStart;
+          const searchEnd = endObjIdx;
+          // dictEnd の絶対位置
+          const absDictEnd = contentStart + content.indexOf(content.slice(dictStart, dictEnd + 2)) + (dictEnd + 2);
+
+          // absDictEnd 以降で最初の stream を探す
+          let streamPos = text.indexOf('stream', absDictEnd);
+          if (streamPos !== -1 && streamPos < searchEnd) {
+            streamPos += 6; // "stream" の長さ
+            if (text[streamPos] === '\r') streamPos++;
+            if (text[streamPos] === '\n') streamPos++;
+            streamDataStart = streamPos;
+          }
+        }
+      } catch(e) {
+        // parseDict 失敗時は dict なしで続行
+        dict = null;
+      }
+    }
+
+    objects.set(key, {
+      objNum, gen, content, rawOffset: objStart,
+      hasStream, streamDataStart, lengthRaw, dict,
+    });
+  }
+  return objects;
+}
+
+    // =====================================================
+    // 参照解決・ページ収集
+    // =====================================================
+
+    function resolveRef(refStr, objects) {
+      if (!refStr) return null;
+      const match = refStr.trim().match(/(\d+)\s+(\d+)\s+R/);
+      if (!match) return null;
+      if (objects.has(`${match[1]} ${match[2]}`)) return objects.get(`${match[1]} ${match[2]}`);
+      for (const [, v] of objects) if (v.objNum === parseInt(match[1], 10)) return v;
+      return null;
+    }
+
+    function extractDict(content) {
+      const start = content.indexOf('<<');
+      if (start === -1) return null;
+      try { return parseDict(content.slice(start, findDictEnd(content, start) + 2)); }
+      catch { return null; }
+    }
+
+    function parseArrayRefs(arrayStr) {
+      const refs = [];
+      const refRegex = /(\d+\s+\d+\s+R)/g;
+      let m;
+      while ((m = refRegex.exec(arrayStr)) !== null) refs.push(m[1].replace(/\s+/g, ' '));
+      return refs;
+    }
+
+    function collectPages(objects, trailer) {
+      const pages = [];
+      const catalogObj = resolveRef(trailer['Root'], objects);
+      if (!catalogObj) throw new Error(`Catalog が見つからない (Root="${trailer['Root']}")`);
+      const catalogDict = extractDict(catalogObj.content);
+      traversePageTree(catalogDict['Pages'], objects, pages);
+
+      // /Kids が空のフォールバック
+      if (pages.length === 0) {
+        for (const [, obj] of objects) {
+          const dict = extractDict(obj.content);
+          if (dict && dict['Contents'] != null) {
+            pages.push({ ref: `${obj.objNum} ${obj.gen} R`, obj, dict });
+          }
+        }
+      }
+      return pages;
+    }
+
+    function traversePageTree(nodeRef, objects, pages) {
+      if (!nodeRef) return;
+      const nodeObj = resolveRef(nodeRef, objects);
+      if (!nodeObj) return;
+      const dict = extractDict(nodeObj.content);
+      if (!dict) return;
+      const type = (dict['Type'] ?? '').replace('/', '');
+      if (type === 'Pages') {
+        for (const ref of parseArrayRefs(dict['Kids'] ?? '')) traversePageTree(ref, objects, pages);
+      } else if (type === 'Page' || dict['Contents'] != null) {
+        pages.push({ ref: nodeRef, obj: nodeObj, dict });
+      }
+    }
+
+    // =====================================================
+    // Step 3: 番号付け直し
+    // =====================================================
+
+    function remapAllObjects(parsedPdfs) {
+      let nextId = 1;
+      const remappedPdfs = [];
+
+      for (const pdf of parsedPdfs) {
+        const { objects, trailer, rawData } = pdf;
+        const idMap = new Map();
+        for (const [key] of objects) idMap.set(key, nextId++);
+
+        const pages = collectPages(objects, trailer);
+        const pageNewIds = pages.map(p => idMap.get(`${p.obj.objNum} ${p.obj.gen}`));
+
+        const remappedObjects = [];
+        for (const [oldKey, obj] of objects) {
+          let resolvedLength = null;
+          if (obj.hasStream && obj.lengthRaw) {
+            if (/^\d+ \d+ R$/.test(obj.lengthRaw)) {
+              const lenObj = resolveRef(obj.lengthRaw, objects);
+              resolvedLength = lenObj ? parseInt(lenObj.content.trim(), 10) : null;
+            } else {
+              resolvedLength = parseInt(obj.lengthRaw, 10);
+            }
+          }
+
+          let newContent = rewriteRefs(obj.content, idMap);
+          // /Length が参照だった場合は実数値に展開
+          if (obj.hasStream && obj.lengthRaw && /^\d+ \d+ R$/.test(obj.lengthRaw)) {
+            newContent = newContent.replace(/\/Length\s+\d+ \d+ R/, `/Length ${resolvedLength}`);
+          }
+
+          remappedObjects.push({
+            newId: idMap.get(oldKey),
+            gen: 0,
+            content: newContent,
+            hasStream: obj.hasStream,
+            streamDataStart: obj.streamDataStart ?? null,
+            resolvedLength,
+            rawData,
+          });
+        }
+
+        remappedPdfs.push({ idMap, objects: remappedObjects, pageNewIds });
+      }
+
+      return { remappedPdfs, nextId };
+    }
+
+    function rewriteRefs(content, idMap) {
+      return content.replace(/(\d+)\s+(\d+)\s+R/g, (match, n, g) => {
+        const newId = idMap.get(`${n} ${g}`);
+        return newId != null ? `${newId} 0 R` : match;
+      });
+    }
+
+    // =====================================================
+    // Step 4: PDFバイナリ組み立て
+    // =====================================================
+
+    function buildPDF(remappedPdfs, nextId) {
+      const buffers = [];
+      let bytePos = 0;
+      const offsets = new Map();
+      const enc = new TextEncoder();
+
+      const writeText = (str) => {
+        const bytes = enc.encode(str);
+        buffers.push(bytes);
+        bytePos += bytes.length;
+      };
+      const writeBytes = (uint8arr) => {
+        buffers.push(uint8arr);
+        bytePos += uint8arr.length;
+      };
+
+      writeText('%PDF-1.4\n');
+      writeText('%\xFF\xFF\xFF\xFF\n');
+
+      const allObjects = remappedPdfs.flatMap(r => r.objects);
+      const allPageIds = remappedPdfs.flatMap(r => r.pageNewIds);
+      const newPagesId = nextId++;
+      const newCatalogId = nextId++;
+
+      for (const obj of allObjects) {
+        if (isCatalogContent(obj.content) || isPagesContent(obj.content)) continue;
+
+        offsets.set(obj.newId, bytePos);
+
+        if (obj.hasStream && obj.streamDataStart != null && obj.resolvedLength != null) {
+          const dictPart = getDictPart(obj.content);
+          let fixedDict = isPageContent(obj.content) ? replaceParent(dictPart, newPagesId) : dictPart;
+          // /Type /Page が省略されているPageには明示的に追加
+          if (isPageContent(obj.content) && !/\/Type\s*\/Page/.test(fixedDict)) {
+            fixedDict = fixedDict.replace('<<', '<< /Type /Page');
+          }
+          writeText(`${obj.newId} 0 obj\n`);
+          writeText(fixedDict);
+          writeText('\nstream\n');
+          writeBytes(obj.rawData.subarray(obj.streamDataStart, obj.streamDataStart + obj.resolvedLength));
+          writeText('\nendstream\nendobj\n');
+        } else {
+          let content = obj.content;
+          if (isPageContent(content)) {
+            content = replaceParent(content, newPagesId);
+            // /Type /Page が省略されていれば補完
+            if (!/\/Type\s*\/Page/.test(content)) {
+              content = content.replace('<<', '<< /Type /Page');
+            }
+          }
+          writeText(`${obj.newId} 0 obj\n${content}\nendobj\n`);
+        }
+      }
+
+      // 新 Pages
+      offsets.set(newPagesId, bytePos);
+      writeText(`${newPagesId} 0 obj\n`);
+      writeText(`<< /Type /Pages /Kids [${allPageIds.map(id => `${id} 0 R`).join(' ')}] /Count ${allPageIds.length} >>\n`);
+      writeText(`endobj\n`);
+
+      // 新 Catalog
+      offsets.set(newCatalogId, bytePos);
+      writeText(`${newCatalogId} 0 obj\n`);
+      writeText(`<< /Type /Catalog /Pages ${newPagesId} 0 R >>\n`);
+      writeText(`endobj\n`);
+
+      // xref
+      const xrefOffset = bytePos;
+      const totalObjs = nextId;
+      writeText(`xref\n0 ${totalObjs}\n`);
+      writeText(`0000000000 65535 f \r\n`);
+      for (let i = 1; i < totalObjs; i++) {
+        const off = offsets.get(i) ?? 0;
+        writeText(`${String(off).padStart(10, '0')} 00000 n \r\n`);
+      }
+
+      writeText(`trailer\n`);
+      writeText(`<< /Size ${totalObjs} /Root ${newCatalogId} 0 R >>\n`);
+      writeText(`startxref\n${xrefOffset}\n%%EOF\n`);
+
+      const total = buffers.reduce((s, b) => s + b.length, 0);
+      const result = new Uint8Array(total);
+      let offset = 0;
+      for (const b of buffers) { result.set(b, offset); offset += b.length; }
+      return result;
+    }
+
+    function getDictPart(content) {
+      const idx = content.indexOf('stream');
+      return idx !== -1 ? content.slice(0, idx).trim() : content;
+    }
+
+    // /Contents を持つ = Page（/Type省略対応）
+    function isPageContent(c) {
+      return /\/Type\s*\/Page\b/.test(c) || (!/\/Type\s*\/Pages\b/.test(c) && /\/Contents\s/.test(c));
+    }
+    function isCatalogContent(c) { return /\/Type\s*\/Catalog\b/.test(c); }
+    function isPagesContent(c)   { return /\/Type\s*\/Pages\b/.test(c); }
+
+    function replaceParent(content, newPagesId) {
+      return /\/Parent\s+\d+\s+\d+\s+R/.test(content)
+        ? content.replace(/\/Parent\s+\d+\s+\d+\s+R/, `/Parent ${newPagesId} 0 R`)
+        : content.replace('<<', `<< /Parent ${newPagesId} 0 R`);
+    }
+
+    function downloadPDF(uint8array, filename) {
+      const blob = new Blob([uint8array], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // =====================================================
+    // UI
+    // =====================================================
+    let parsedPdfs = [];
+
+    document.getElementById('fileInput').addEventListener('change', async (e) => {
+      const files = [...e.target.files];
+      const out = document.getElementById('output');
+      const btn = document.getElementById('mergeBtn');
+      btn.disabled = true;
+
+      if (files.length < 2) { out.textContent = '⚠️ 2つ以上のPDFを選択してください'; return; }
+
+      try {
+        parsedPdfs = await Promise.all(files.map(async (file) => {
+          const buffer = await file.arrayBuffer();
+          return { ...parsePDF(new Uint8Array(buffer)), name: file.name };
+        }));
+
+        const lines = [`✅ ${parsedPdfs.length}個のPDFを読み込みました\n`];
+        parsedPdfs.forEach((pdf, i) => {
+          const pages = collectPages(pdf.objects, pdf.trailer);
+          lines.push(`  ${i+1}. ${pdf.name}: ${pages.length}ページ / オブジェクト${pdf.objects.size}個`);
+
+          // デバッグ: ページ詳細
+          pages.forEach((p, pi) => {
+            lines.push(`     Page${pi+1} obj${p.obj.objNum}: Parent=${p.dict['Parent']} Contents=${p.dict['Contents']}`);
+          });
+        });
+        lines.push('\n「結合してダウンロード」を押してください');
+        out.textContent = lines.join('\n');
+        btn.disabled = false;
+      } catch (err) {
+        out.textContent = `❌ 読み込みエラー: ${err.message}\n${err.stack}`;
+      }
+    });
+
+    document.getElementById('mergeBtn').addEventListener('click', () => {
+      const out = document.getElementById('output');
+      try {
+        const { remappedPdfs, nextId } = remapAllObjects(parsedPdfs);
+
+        // デバッグ: 結合後の先頭500バイトをテキスト表示
+        const pdfBytes = buildPDF(remappedPdfs, nextId);
+        const preview = decodeLatin1(pdfBytes.slice(0, 800)).replace(/[^\x20-\x7E\n]/g, '?');
+        out.textContent += '\n\n=== 結合PDF先頭800バイト ===\n' + preview;
+
+        downloadPDF(pdfBytes, 'merged.pdf');
+        out.textContent += '\n\n✅ merged.pdf をダウンロードしました';
+      } catch (err) {
+        out.textContent = `❌ 結合エラー: ${err.message}\n${err.stack}`;
+      }
+    });
+
+  </script>
+</body>
+</html>
