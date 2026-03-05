@@ -2,27 +2,201 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>PDF Merger - デバッグ強化版</title>
+  <title>PDF Merger</title>
   <style>
-    body { font-family: sans-serif; padding: 20px; }
-    #output { background: #f4f4f4; padding: 10px; font-size: 11px; max-height: 500px; overflow-y: auto; }
-    button { margin-top: 10px; padding: 8px 20px; font-size: 14px; cursor: pointer; }
-    button:disabled { opacity: 0.4; }
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+JP:wght@300;400;500&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'IBM Plex Sans JP', sans-serif;
+      background: #0e0e10;
+      color: #e8e8e8;
+      min-height: 100vh;
+      padding: 40px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h1 {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: 0.15em;
+      color: #f0f0f0;
+      text-transform: uppercase;
+      margin-bottom: 32px;
+    }
+
+    h1 span {
+      color: #5b8cff;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 560px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Drop Zone */
+    .drop-zone {
+      border: 1.5px dashed #3a3a4a;
+      border-radius: 10px;
+      padding: 40px 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      background: #15151a;
+      position: relative;
+    }
+
+    .drop-zone:hover,
+    .drop-zone.dragover {
+      border-color: #5b8cff;
+      background: #16182a;
+    }
+
+    .drop-zone.dragover {
+      border-style: solid;
+    }
+
+    .drop-icon {
+      font-size: 2.4rem;
+      margin-bottom: 12px;
+      line-height: 1;
+      filter: grayscale(0.3);
+      transition: transform 0.2s;
+    }
+
+    .drop-zone.dragover .drop-icon {
+      transform: scale(1.15);
+    }
+
+    .drop-label {
+      font-size: 0.9rem;
+      color: #888;
+      line-height: 1.6;
+    }
+
+    .drop-label strong {
+      color: #ccc;
+      font-weight: 500;
+    }
+
+    .drop-label .hint {
+      font-size: 0.78rem;
+      color: #555;
+      margin-top: 6px;
+    }
+
+    #fileInput {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* File List */
+    .file-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #1b1b22;
+      border: 1px solid #2a2a35;
+      border-radius: 7px;
+      padding: 10px 14px;
+      font-size: 0.82rem;
+      animation: fadeIn 0.2s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .file-item .file-icon { color: #5b8cff; font-size: 1rem; flex-shrink: 0; }
+    .file-item .file-name { flex: 1; color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-item .file-pages { font-family: 'IBM Plex Mono', monospace; color: #555; font-size: 0.75rem; flex-shrink: 0; }
+
+    /* Merge Button */
+    #mergeBtn {
+      background: #5b8cff;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 13px;
+      font-size: 0.9rem;
+      font-family: 'IBM Plex Sans JP', sans-serif;
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+    }
+
+    #mergeBtn:hover:not(:disabled) { background: #4a7aee; }
+    #mergeBtn:active:not(:disabled) { transform: scale(0.98); }
+    #mergeBtn:disabled { background: #252530; color: #444; cursor: not-allowed; }
+
+    /* Output Log */
+    #output {
+      background: #111116;
+      border: 1px solid #222230;
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.74rem;
+      color: #888;
+      max-height: 260px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      line-height: 1.7;
+    }
+
+    #output:empty { display: none; }
+
+    .status-ok  { color: #4caf82; }
+    .status-err { color: #e05c5c; }
   </style>
 </head>
 <body>
-  <h2>PDF結合ツール</h2>
-  <input type="file" id="fileInput" accept=".pdf" multiple>
-  <br>
-  <button id="mergeBtn" disabled>結合してダウンロード</button>
-  <pre id="output">PDFを複数選択してください</pre>
+  <h1>PDF <span>//</span> MERGER</h1>
+
+  <div class="container">
+
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" accept=".pdf" multiple>
+      <div class="drop-icon">📄</div>
+      <div class="drop-label">
+        <strong>ここにPDFをドロップ</strong><br>
+        またはクリックして選択
+        <div class="hint">2ファイル以上を選択してください</div>
+      </div>
+    </div>
+
+    <div class="file-list" id="fileList"></div>
+
+    <button id="mergeBtn" disabled>結合してダウンロード</button>
+
+    <pre id="output"></pre>
+  </div>
 
   <script type="module">
 
     // =====================================================
     // ユーティリティ
     // =====================================================
-
     function decodeLatin1(uint8array) {
       let str = '';
       const chunk = 65536;
@@ -43,26 +217,21 @@
       throw new Error('Unclosed dictionary');
     }
 
-    // ★修正: /Name /Value の Value として /Name2 形式（名前オブジェクト）を正しく取る
     function parseDict(text) {
       const result = {};
       const start = text.indexOf('<<');
       if (start === -1) return result;
       const end = findDictEnd(text, start);
       const inner = text.slice(start + 2, end);
-
       let i = 0;
       while (i < inner.length) {
-        // キー: /Xxx
         while (i < inner.length && inner[i] !== '/') i++;
         if (i >= inner.length) break;
-        i++; // '/' をスキップ
+        i++;
         let keyEnd = i;
         while (keyEnd < inner.length && /[\w]/.test(inner[keyEnd])) keyEnd++;
         const key = inner.slice(i, keyEnd);
         i = keyEnd;
-
-        // 値をパース
         while (i < inner.length && /[ \t\r\n]/.test(inner[i])) i++;
         const value = parseDictValue(inner, i);
         result[key] = value.val;
@@ -72,12 +241,10 @@
     }
 
     function parseDictValue(text, i) {
-      // 入れ子辞書
       if (text[i] === '<' && text[i+1] === '<') {
         const end = findDictEnd(text, i);
         return { val: text.slice(i, end + 2), end: end + 2 };
       }
-      // 配列
       if (text[i] === '[') {
         let depth = 0, j = i;
         while (j < text.length) {
@@ -87,16 +254,13 @@
         }
         return { val: text.slice(i), end: text.length };
       }
-      // 名前オブジェクト /Xxx → 値として "/Xxx" を返す
       if (text[i] === '/') {
         let j = i + 1;
         while (j < text.length && /[\w+\-]/.test(text[j])) j++;
         return { val: text.slice(i, j), end: j };
       }
-      // 間接参照 N G R
       const refMatch = text.slice(i).match(/^(\d+)\s+(\d+)\s+R/);
       if (refMatch) return { val: `${refMatch[1]} ${refMatch[2]} R`, end: i + refMatch[0].length };
-      // リテラル文字列 (...)
       if (text[i] === '(') {
         let depth = 0, j = i;
         while (j < text.length) {
@@ -106,12 +270,10 @@
           j++;
         }
       }
-      // 16進文字列 <...>
       if (text[i] === '<' && text[i+1] !== '<') {
         const j = text.indexOf('>', i);
         return { val: text.slice(i, j+1), end: j+1 };
       }
-      // 数値・真偽値・null など（次の空白か特殊文字まで）
       const m = text.slice(i).match(/^[^\s/<>\[\]()]+/);
       if (m) return { val: m[0], end: i + m[0].length };
       return { val: '', end: i + 1 };
@@ -120,16 +282,13 @@
     // =====================================================
     // パーサー
     // =====================================================
-
     function parsePDF(data) {
       const text = decodeLatin1(data);
       if (!text.startsWith('%PDF-')) throw new Error('Not a valid PDF file');
       const version = text.slice(5, 8);
-
       const all = [...text.matchAll(/startxref\s+(\d+)/g)];
       if (!all.length) throw new Error('Cannot find startxref');
       const xrefOffset = parseInt(all.at(-1)[1], 10);
-
       const xrefArea = text.slice(xrefOffset, xrefOffset + 20).trimStart();
       let xref, trailer;
       if (/^\d+ \d+ obj/.test(xrefArea)) {
@@ -139,7 +298,6 @@
         xref = parseXref(text, xrefOffset);
         trailer = parseTrailer(text, xrefOffset);
       }
-
       const objects = parseObjects(text, data);
       return { version, xref, trailer, objects, rawText: text, rawData: data };
     }
@@ -170,11 +328,7 @@
           pos += 20;
           const parts = entry.trim().split(/\s+/);
           if (parts.length < 3) continue;
-          xref.set(startObj + i, {
-            byteOffset: parseInt(parts[0], 10),
-            gen: parseInt(parts[1], 10),
-            inUse: parts[2] === 'n',
-          });
+          xref.set(startObj + i, { byteOffset: parseInt(parts[0], 10), gen: parseInt(parts[1], 10), inUse: parts[2] === 'n' });
         }
         while (pos < text.length && /\s/.test(text[pos])) pos++;
       }
@@ -183,82 +337,55 @@
 
     function parseTrailer(text, xrefOffset) {
       let searchFrom = xrefOffset, trailerIdx = -1, found;
-      while ((found = text.indexOf('trailer', searchFrom)) !== -1) {
-        trailerIdx = found; searchFrom = found + 1;
-      }
+      while ((found = text.indexOf('trailer', searchFrom)) !== -1) { trailerIdx = found; searchFrom = found + 1; }
       if (trailerIdx === -1) throw new Error('trailer not found');
       const dictStart = text.indexOf('<<', trailerIdx);
       return parseDict(text.slice(dictStart, findDictEnd(text, dictStart) + 2));
     }
 
-function parseObjects(text, rawData) {
-  const objects = new Map();
-  const objRegex = /(\d+)\s+(\d+)\s+obj\b/g;
-  let match;
-
-  while ((match = objRegex.exec(text)) !== null) {
-    const objNum = parseInt(match[1], 10);
-    const gen = parseInt(match[2], 10);
-    const objStart = match.index;
-    const contentStart = objStart + match[0].length;
-    const endObjIdx = text.indexOf('endobj', contentStart);
-    if (endObjIdx === -1) continue;
-
-    const content = text.slice(contentStart, endObjIdx).trim();
-    const key = `${objNum} ${gen}`;
-
-    // 辞書を探す
-    const dictStart = content.indexOf('<<');
-    let dict = null;
-    let lengthRaw = null;
-    let hasStream = false;
-    let streamDataStart = null;
-
-    if (dictStart !== -1) {
-      try {
-        const dictEnd = findDictEnd(content, dictStart);
-        const dictText = content.slice(dictStart, dictEnd + 2);
-        dict = parseDict(dictText);
-        lengthRaw = dict['Length'] ?? null;
-
-        // 辞書の終端より後に stream キーワードがあるか
-        const rest = content.slice(dictEnd + 2);
-        if (/[\r\n]\s*stream[\r\n]|>>\s*stream[\r\n]/.test(rest) || /^\s*stream[\r\n]/.test(rest)) {
-          hasStream = true;
-
-          // rawText 上で "N G obj" の位置から stream\n を探す
-          const searchFrom = objStart;
-          const searchEnd = endObjIdx;
-          // dictEnd の絶対位置
-          const absDictEnd = contentStart + content.indexOf(content.slice(dictStart, dictEnd + 2)) + (dictEnd + 2);
-
-          // absDictEnd 以降で最初の stream を探す
-          let streamPos = text.indexOf('stream', absDictEnd);
-          if (streamPos !== -1 && streamPos < searchEnd) {
-            streamPos += 6; // "stream" の長さ
-            if (text[streamPos] === '\r') streamPos++;
-            if (text[streamPos] === '\n') streamPos++;
-            streamDataStart = streamPos;
-          }
+    function parseObjects(text, rawData) {
+      const objects = new Map();
+      const objRegex = /(\d+)\s+(\d+)\s+obj\b/g;
+      let match;
+      while ((match = objRegex.exec(text)) !== null) {
+        const objNum = parseInt(match[1], 10);
+        const gen = parseInt(match[2], 10);
+        const objStart = match.index;
+        const contentStart = objStart + match[0].length;
+        const endObjIdx = text.indexOf('endobj', contentStart);
+        if (endObjIdx === -1) continue;
+        const content = text.slice(contentStart, endObjIdx).trim();
+        const key = `${objNum} ${gen}`;
+        const dictStart = content.indexOf('<<');
+        let dict = null, lengthRaw = null, hasStream = false, streamDataStart = null;
+        if (dictStart !== -1) {
+          try {
+            const dictEnd = findDictEnd(content, dictStart);
+            const dictText = content.slice(dictStart, dictEnd + 2);
+            dict = parseDict(dictText);
+            lengthRaw = dict['Length'] ?? null;
+            const rest = content.slice(dictEnd + 2);
+            if (/[\r\n]\s*stream[\r\n]|>>\s*stream[\r\n]/.test(rest) || /^\s*stream[\r\n]/.test(rest)) {
+              hasStream = true;
+              const absDictEnd = contentStart + content.indexOf(content.slice(dictStart, dictEnd + 2)) + (dictEnd + 2);
+              let streamPos = text.indexOf('stream', absDictEnd);
+              if (streamPos !== -1 && streamPos < endObjIdx) {
+                streamPos += 6;
+                if (text[streamPos] === '\r') streamPos++;
+                if (text[streamPos] === '\n') streamPos++;
+                streamDataStart = streamPos;
+              }
+            }
+          } catch(e) { dict = null; }
         }
-      } catch(e) {
-        // parseDict 失敗時は dict なしで続行
-        dict = null;
+        objects.set(key, { objNum, gen, content, rawOffset: objStart, hasStream, streamDataStart, lengthRaw, dict });
       }
+      return objects;
     }
-
-    objects.set(key, {
-      objNum, gen, content, rawOffset: objStart,
-      hasStream, streamDataStart, lengthRaw, dict,
-    });
-  }
-  return objects;
-}
 
     // =====================================================
     // 参照解決・ページ収集
     // =====================================================
-
     function resolveRef(refStr, objects) {
       if (!refStr) return null;
       const match = refStr.trim().match(/(\d+)\s+(\d+)\s+R/);
@@ -289,14 +416,10 @@ function parseObjects(text, rawData) {
       if (!catalogObj) throw new Error(`Catalog が見つからない (Root="${trailer['Root']}")`);
       const catalogDict = extractDict(catalogObj.content);
       traversePageTree(catalogDict['Pages'], objects, pages);
-
-      // /Kids が空のフォールバック
       if (pages.length === 0) {
         for (const [, obj] of objects) {
           const dict = extractDict(obj.content);
-          if (dict && dict['Contents'] != null) {
-            pages.push({ ref: `${obj.objNum} ${obj.gen} R`, obj, dict });
-          }
+          if (dict && dict['Contents'] != null) pages.push({ ref: `${obj.objNum} ${obj.gen} R`, obj, dict });
         }
       }
       return pages;
@@ -319,19 +442,15 @@ function parseObjects(text, rawData) {
     // =====================================================
     // Step 3: 番号付け直し
     // =====================================================
-
     function remapAllObjects(parsedPdfs) {
       let nextId = 1;
       const remappedPdfs = [];
-
       for (const pdf of parsedPdfs) {
         const { objects, trailer, rawData } = pdf;
         const idMap = new Map();
         for (const [key] of objects) idMap.set(key, nextId++);
-
         const pages = collectPages(objects, trailer);
         const pageNewIds = pages.map(p => idMap.get(`${p.obj.objNum} ${p.obj.gen}`));
-
         const remappedObjects = [];
         for (const [oldKey, obj] of objects) {
           let resolvedLength = null;
@@ -343,27 +462,18 @@ function parseObjects(text, rawData) {
               resolvedLength = parseInt(obj.lengthRaw, 10);
             }
           }
-
           let newContent = rewriteRefs(obj.content, idMap);
-          // /Length が参照だった場合は実数値に展開
           if (obj.hasStream && obj.lengthRaw && /^\d+ \d+ R$/.test(obj.lengthRaw)) {
             newContent = newContent.replace(/\/Length\s+\d+ \d+ R/, `/Length ${resolvedLength}`);
           }
-
           remappedObjects.push({
-            newId: idMap.get(oldKey),
-            gen: 0,
-            content: newContent,
-            hasStream: obj.hasStream,
-            streamDataStart: obj.streamDataStart ?? null,
-            resolvedLength,
-            rawData,
+            newId: idMap.get(oldKey), gen: 0, content: newContent,
+            hasStream: obj.hasStream, streamDataStart: obj.streamDataStart ?? null,
+            resolvedLength, rawData,
           });
         }
-
         remappedPdfs.push({ idMap, objects: remappedObjects, pageNewIds });
       }
-
       return { remappedPdfs, nextId };
     }
 
@@ -377,22 +487,13 @@ function parseObjects(text, rawData) {
     // =====================================================
     // Step 4: PDFバイナリ組み立て
     // =====================================================
-
     function buildPDF(remappedPdfs, nextId) {
       const buffers = [];
       let bytePos = 0;
       const offsets = new Map();
       const enc = new TextEncoder();
-
-      const writeText = (str) => {
-        const bytes = enc.encode(str);
-        buffers.push(bytes);
-        bytePos += bytes.length;
-      };
-      const writeBytes = (uint8arr) => {
-        buffers.push(uint8arr);
-        bytePos += uint8arr.length;
-      };
+      const writeText = (str) => { const b = enc.encode(str); buffers.push(b); bytePos += b.length; };
+      const writeBytes = (u8) => { buffers.push(u8); bytePos += u8.length; };
 
       writeText('%PDF-1.4\n');
       writeText('%\xFF\xFF\xFF\xFF\n');
@@ -404,16 +505,12 @@ function parseObjects(text, rawData) {
 
       for (const obj of allObjects) {
         if (isCatalogContent(obj.content) || isPagesContent(obj.content)) continue;
-
         offsets.set(obj.newId, bytePos);
-
         if (obj.hasStream && obj.streamDataStart != null && obj.resolvedLength != null) {
           const dictPart = getDictPart(obj.content);
           let fixedDict = isPageContent(obj.content) ? replaceParent(dictPart, newPagesId) : dictPart;
-          // /Type /Page が省略されているPageには明示的に追加
-          if (isPageContent(obj.content) && !/\/Type\s*\/Page/.test(fixedDict)) {
+          if (isPageContent(obj.content) && !/\/Type\s*\/Page/.test(fixedDict))
             fixedDict = fixedDict.replace('<<', '<< /Type /Page');
-          }
           writeText(`${obj.newId} 0 obj\n`);
           writeText(fixedDict);
           writeText('\nstream\n');
@@ -423,28 +520,22 @@ function parseObjects(text, rawData) {
           let content = obj.content;
           if (isPageContent(content)) {
             content = replaceParent(content, newPagesId);
-            // /Type /Page が省略されていれば補完
-            if (!/\/Type\s*\/Page/.test(content)) {
-              content = content.replace('<<', '<< /Type /Page');
-            }
+            if (!/\/Type\s*\/Page/.test(content)) content = content.replace('<<', '<< /Type /Page');
           }
           writeText(`${obj.newId} 0 obj\n${content}\nendobj\n`);
         }
       }
 
-      // 新 Pages
       offsets.set(newPagesId, bytePos);
       writeText(`${newPagesId} 0 obj\n`);
       writeText(`<< /Type /Pages /Kids [${allPageIds.map(id => `${id} 0 R`).join(' ')}] /Count ${allPageIds.length} >>\n`);
       writeText(`endobj\n`);
 
-      // 新 Catalog
       offsets.set(newCatalogId, bytePos);
       writeText(`${newCatalogId} 0 obj\n`);
       writeText(`<< /Type /Catalog /Pages ${newPagesId} 0 R >>\n`);
       writeText(`endobj\n`);
 
-      // xref
       const xrefOffset = bytePos;
       const totalObjs = nextId;
       writeText(`xref\n0 ${totalObjs}\n`);
@@ -453,7 +544,6 @@ function parseObjects(text, rawData) {
         const off = offsets.get(i) ?? 0;
         writeText(`${String(off).padStart(10, '0')} 00000 n \r\n`);
       }
-
       writeText(`trailer\n`);
       writeText(`<< /Size ${totalObjs} /Root ${newCatalogId} 0 R >>\n`);
       writeText(`startxref\n${xrefOffset}\n%%EOF\n`);
@@ -469,14 +559,9 @@ function parseObjects(text, rawData) {
       const idx = content.indexOf('stream');
       return idx !== -1 ? content.slice(0, idx).trim() : content;
     }
-
-    // /Contents を持つ = Page（/Type省略対応）
-    function isPageContent(c) {
-      return /\/Type\s*\/Page\b/.test(c) || (!/\/Type\s*\/Pages\b/.test(c) && /\/Contents\s/.test(c));
-    }
+    function isPageContent(c)    { return /\/Type\s*\/Page\b/.test(c) || (!/\/Type\s*\/Pages\b/.test(c) && /\/Contents\s/.test(c)); }
     function isCatalogContent(c) { return /\/Type\s*\/Catalog\b/.test(c); }
     function isPagesContent(c)   { return /\/Type\s*\/Pages\b/.test(c); }
-
     function replaceParent(content, newPagesId) {
       return /\/Parent\s+\d+\s+\d+\s+R/.test(content)
         ? content.replace(/\/Parent\s+\d+\s+\d+\s+R/, `/Parent ${newPagesId} 0 R`)
@@ -496,13 +581,38 @@ function parseObjects(text, rawData) {
     // =====================================================
     let parsedPdfs = [];
 
-    document.getElementById('fileInput').addEventListener('change', async (e) => {
-      const files = [...e.target.files];
-      const out = document.getElementById('output');
-      const btn = document.getElementById('mergeBtn');
-      btn.disabled = true;
+    const dropZone  = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const fileList  = document.getElementById('fileList');
+    const mergeBtn  = document.getElementById('mergeBtn');
+    const output    = document.getElementById('output');
 
-      if (files.length < 2) { out.textContent = '⚠️ 2つ以上のPDFを選択してください'; return; }
+    // クリック → input 経由
+    fileInput.addEventListener('change', (e) => handleFiles([...e.target.files]));
+
+    // Drag & Drop
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      const files = [...e.dataTransfer.files].filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf'));
+      if (files.length) handleFiles(files);
+    });
+
+    async function handleFiles(files) {
+      mergeBtn.disabled = true;
+      fileList.innerHTML = '';
+      output.textContent = '';
+      parsedPdfs = [];
+
+      if (files.length < 2) {
+        output.textContent = '⚠️  2つ以上のPDFを選択してください';
+        return;
+      }
 
       try {
         parsedPdfs = await Promise.all(files.map(async (file) => {
@@ -510,38 +620,35 @@ function parseObjects(text, rawData) {
           return { ...parsePDF(new Uint8Array(buffer)), name: file.name };
         }));
 
-        const lines = [`✅ ${parsedPdfs.length}個のPDFを読み込みました\n`];
-        parsedPdfs.forEach((pdf, i) => {
+        let totalPages = 0;
+        parsedPdfs.forEach((pdf) => {
           const pages = collectPages(pdf.objects, pdf.trailer);
-          lines.push(`  ${i+1}. ${pdf.name}: ${pages.length}ページ / オブジェクト${pdf.objects.size}個`);
-
-          // デバッグ: ページ詳細
-          pages.forEach((p, pi) => {
-            lines.push(`     Page${pi+1} obj${p.obj.objNum}: Parent=${p.dict['Parent']} Contents=${p.dict['Contents']}`);
-          });
+          totalPages += pages.length;
+          const item = document.createElement('div');
+          item.className = 'file-item';
+          item.innerHTML = `
+            <span class="file-icon">📄</span>
+            <span class="file-name">${pdf.name}</span>
+            <span class="file-pages">${pages.length}p</span>
+          `;
+          fileList.appendChild(item);
         });
-        lines.push('\n「結合してダウンロード」を押してください');
-        out.textContent = lines.join('\n');
-        btn.disabled = false;
-      } catch (err) {
-        out.textContent = `❌ 読み込みエラー: ${err.message}\n${err.stack}`;
-      }
-    });
 
-    document.getElementById('mergeBtn').addEventListener('click', () => {
-      const out = document.getElementById('output');
+        output.textContent = `✅  ${parsedPdfs.length} ファイル読み込み完了 — 合計 ${totalPages} ページ`;
+        mergeBtn.disabled = false;
+      } catch (err) {
+        output.textContent = `❌  読み込みエラー: ${err.message}`;
+      }
+    }
+
+    mergeBtn.addEventListener('click', () => {
       try {
         const { remappedPdfs, nextId } = remapAllObjects(parsedPdfs);
-
-        // デバッグ: 結合後の先頭500バイトをテキスト表示
         const pdfBytes = buildPDF(remappedPdfs, nextId);
-        const preview = decodeLatin1(pdfBytes.slice(0, 800)).replace(/[^\x20-\x7E\n]/g, '?');
-        out.textContent += '\n\n=== 結合PDF先頭800バイト ===\n' + preview;
-
         downloadPDF(pdfBytes, 'merged.pdf');
-        out.textContent += '\n\n✅ merged.pdf をダウンロードしました';
+        output.textContent += '\n✅  merged.pdf をダウンロードしました';
       } catch (err) {
-        out.textContent = `❌ 結合エラー: ${err.message}\n${err.stack}`;
+        output.textContent = `❌  結合エラー: ${err.message}\n${err.stack}`;
       }
     });
 
